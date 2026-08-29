@@ -378,7 +378,7 @@ function testWriterPrompt(
 
 function documentationPrompt(updates: string[]): string {
   return [
-    "You are the reviewer in documentation mode. Apply ONLY the following documentation updates by editing documentation files (README.md, docs/, website/) in your working directory. Do not touch implementation or tests.",
+    "You are the reviewer in documentation mode. Apply ONLY the following documentation updates by editing documentation files (README.md, docs/) in your working directory. Do not touch implementation or tests.",
     "Updates to apply:",
     ...(updates.length > 0 ? updates.map((u) => `- ${u}`) : ["- Refresh affected documentation for the delivered feature."]),
     "Return ONE reviewer JSON completion; set documentationUpdates to the documentation files you touched.",
@@ -1481,7 +1481,7 @@ export class Engine {
     const updates = this.reviewerDocumentationUpdates;
     const result = await this.runAgent("reviewer", documentationPrompt(updates), {
       cwd: staging,
-      writableRoots: [join(staging, "README.md"), join(staging, "docs"), join(staging, "website")],
+      writableRoots: [join(staging, "README.md"), join(staging, "docs")],
     });
     if (this.bail()) return;
     if (!result.ok) {
