@@ -4,12 +4,17 @@
   "type": "module",
   "description": "Deterministic, evidence-based multi-agent feature delivery for the pi coding agent.",
   "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions/gx-dev/index.ts"]
+  },
   "license": "MIT",
   "engines": { "node": ">=22" },
   "files": [
     "extensions",
     "agents",
     "scripts",
+    "website",
+    "PLAN.md",
     "README.md",
     "LICENSE"
   ],
