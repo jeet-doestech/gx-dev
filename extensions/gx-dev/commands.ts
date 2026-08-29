@@ -93,6 +93,30 @@ export function setEngineResetHook(hook: () => void): void {
   engineResetHook = hook;
 }
 
+export type GxOutputLevel = "info" | "warning" | "error";
+type OutputSink = (text: string, level: GxOutputLevel) => void;
+let outputSink: OutputSink | null = null;
+
+/**
+ * Registers the persistent output channel (pi.appendEntry renderer wired in
+ * index.ts). Until set — or outside the TUI — gxOut falls back to toasts.
+ */
+export function setOutputSink(sink: OutputSink | null): void {
+  outputSink = sink;
+}
+
+/** Durable command output: persistent transcript entry when available. */
+export function gxOut(
+  ctx: ExtensionCommandContext,
+  text: string,
+  level: GxOutputLevel = "info",
+): void {
+  if (outputSink !== null) {
+    outputSink(text, level);
+    return;
+  }
+  ctx.ui.notify(text, level);
+}
 function resetEngineViaHook(): void {
   engineResetHook?.();
 }
@@ -104,12 +128,12 @@ async function startCommand(
 ): Promise<void> {
   const request = args.trim();
   if (request.length === 0) {
-    ctx.ui.notify("usage: /gx-dev start <request>", "warning");
+    gxOut(ctx, "usage: /gx-dev start <request>", "warning");
     return;
   }
   await engine.start(request);
   const state = engine.status();
-  ctx.ui.notify(
+  gxOut(ctx, 
     state ? `gx-dev run started: ${state.runId}` : "gx-dev run started",
     "info",
   );
@@ -121,12 +145,12 @@ async function statusCommand(
 ): Promise<void> {
   const state: RunState | null = engine.status();
   if (!state) {
-    ctx.ui.notify("gx-dev: no active run (start one with /gx-dev start <request>)", "info");
+    gxOut(ctx, "gx-dev: no active run (start one with /gx-dev start <request>)", "info");
     return;
   }
-  ctx.ui.notify(renderStateLine(state), "info");
+  gxOut(ctx, renderStateLine(state), "info");
   if (state.pendingQuestion) {
-    ctx.ui.notify(
+    gxOut(ctx, 
       `question pending [${state.pendingQuestion.severity}]: ${state.pendingQuestion.question} \u2014 /gx-dev answer <text> or /gx-dev dashboard`,
       "warning",
     );
@@ -140,7 +164,7 @@ async function answerCommand(
 ): Promise<void> {
   const text = args.trim();
   if (text.length === 0) {
-    ctx.ui.notify("usage: /gx-dev answer <text>", "warning");
+    gxOut(ctx, "usage: /gx-dev answer <text>", "warning");
     return;
   }
   await engine.answer(text);
@@ -166,12 +190,12 @@ async function historyCommand(
 ): Promise<void> {
   const runs = await new FsRunStore(ctx.cwd).list();
   if (runs.length === 0) {
-    ctx.ui.notify("gx-dev: no runs recorded", "info");
+    gxOut(ctx, "gx-dev: no runs recorded", "info");
     return;
   }
   const lines = runs.slice(0, 15).map((r) => `${r.runId}  ${r.state}  ${r.updatedAt}`);
   const suffix = runs.length > lines.length ? `\n\u2026 and ${runs.length - lines.length} more` : "";
-  ctx.ui.notify(`gx-dev runs (newest first):\n${lines.join("\n")}${suffix}`, "info");
+  gxOut(ctx, `gx-dev runs (newest first):\n${lines.join("\n")}${suffix}`, "info");
 }
 
 async function configCommand(
@@ -198,7 +222,7 @@ async function configCommand(
     `memory: ${cfg.memory.enabled ? "enabled" : "off"}, review ${cfg.memory.reviewRequired ? "required" : "not required"}, redaction ${cfg.memory.redactSecrets ? "on" : "off"}`,
     `git: worktreeRoot ${cfg.git.worktreeRoot}, autoCommit ${cfg.git.autoCommit}, retainFailedRuns ${cfg.git.retainFailedRuns}`,
   ].join("\n");
-  ctx.ui.notify(`gx-dev effective config (.gx-dev/config.json):\n${summary}`, "info");
+  gxOut(ctx, `gx-dev effective config (.gx-dev/config.json):\n${summary}`, "info");
 }
 
 async function modelsCommand(
@@ -229,7 +253,7 @@ async function modelsCommand(
     await modelsSetCommand(ctx, parts[1], parts[2]);
     return;
   }
-  ctx.ui.notify(
+  gxOut(ctx, 
     `usage: /gx-dev models [show | set <role> <spec>] \u2014 roles: ${MODEL_ROLE_KEYS.join(", ")}`,
     "warning",
   );
@@ -271,7 +295,7 @@ async function modelsSetCommand(
   if (spec !== INHERIT_MODEL) {
     const available = await loadAvailableModelsBudgeted(ctx, (await loadConfig(ctx.cwd)).agents.piBinary, 3000);
     if (available !== null && available.models.length > 0 && matchModel([...available.models], spec) === null) {
-      ctx.ui.notify(
+      gxOut(ctx, 
         `gx-dev warning: "${spec}" matched none of ${available.models.length} available models (${available.source}); selection saved, but runs may fail to start this agent`,
         "warning",
       );
@@ -281,7 +305,7 @@ async function modelsSetCommand(
   await mergeModelSelection(ctx.cwd, role, spec);
   const sources = await loadRoleModelSources(ctx.cwd, agentsDir);
   const overview = resolveRoleOverview(sources, role);
-  ctx.ui.notify(`gx-dev: ${role} \u2192 ${overview.spec} (${overview.source})`, "info");
+  gxOut(ctx, `gx-dev: ${role} \u2192 ${overview.spec} (${overview.source})`, "info");
   resetEngineViaHook();
   ctx.ui.notify(
     "gx-dev: engine reset \u2014 the next /gx-dev start rebuilds agents with the new model selection",
@@ -349,7 +373,7 @@ async function doctorCommand(
 
   const lines = checks.map((c) => `${c.ok ? "\u2713" : "\u2717"} ${c.name}: ${c.detail}`);
   const allOk = checks.every((c) => c.ok);
-  ctx.ui.notify(
+  gxOut(ctx, 
     `gx-dev doctor \u2014 ${allOk ? "all checks passed" : "PROBLEMS FOUND"}:\n${lines.join("\n")}`,
     allOk ? "info" : "warning",
   );

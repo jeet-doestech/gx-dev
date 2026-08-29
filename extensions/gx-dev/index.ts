@@ -26,6 +26,7 @@
 
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Box, Text } from "@earendil-works/pi-tui";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Engine } from "./orchestration/engine.ts";
 import type { EngineDeps } from "./orchestration/engine.ts";
@@ -45,6 +46,7 @@ import {
   gxUsageText,
   resolveAgentsDir,
   setEngineResetHook,
+  setOutputSink,
 } from "./commands.ts";
 import { createWorkflowWidget } from "./ui/workflow-widget.ts";
 import type { GxWorkflowWidget } from "./ui/workflow-widget.ts";
@@ -261,6 +263,26 @@ export default function activate(pi: ExtensionAPI): void {
   // this hook (commands.ts cannot import index.ts without a cycle).
   setEngineResetHook(resetActiveEngine);
 
+  // Durable command output: persistent, TUI-only transcript entries (never
+  // sent to the LLM). Registered once; level colors follow the active theme.
+  pi.registerEntryRenderer("gx-dev-output", (entry, _opts, theme) => {
+    const data = entry.data as { text?: string; level?: string };
+    const level = data?.["level"];
+    const text = typeof data?.["text"] === "string" ? data["text"] : "";
+    const color = (t: typeof theme, s: string): string =>
+      level === "error" ? t.fg("error", s)
+      : level === "warning" ? t.fg("warning", s)
+      : t.fg("muted", s);
+    const lines = text.split("\n");
+    const children = lines.map((l) => new Text(color(theme, l === "" ? " " : l)));
+    const box = new Box(1, 1);
+    for (const child of children) box.addChild(child);
+    return box;
+  });
+  setOutputSink((text, level) => {
+    pi.appendEntry("gx-dev-output", { text, level });
+  });
+
   // Widget install happens on session_start (not in the factory) because UI
   // access requires an ExtensionContext and session-scoped resources must not
   // start from the extension factory.
@@ -278,6 +300,7 @@ export default function activate(pi: ExtensionAPI): void {
     enginePromise = null;
     activeCtx = null;
     bufferedAnswer = null;
+    setOutputSink(null);
   });
 
   pi.registerCommand("gx-dev", {
