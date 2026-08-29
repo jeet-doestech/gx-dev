@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="gx-dev security: prompt injection defense, project trust, path restrictions, secret handling, and Git safety."><title>Security &amp; integrity — gx-dev</title><link rel="stylesheet" href="assets/styles.css"><script>document.documentElement.dataset.theme=localStorage.getItem('gx-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')</script></head>
+<body><a class="skip-link" href="#main">Skip to content</a><header class="site-header"><div class="header-inner"><a class="brand" href="index.html"><span class="brand-mark">gx</span><span>gx-dev</span></a><nav class="site-nav" data-nav aria-label="Primary"><a href="index.html">Overview</a><a href="workflow.html">Workflow</a><a href="architecture.html">Architecture</a><a href="agents.html">Agents</a><a href="gates.html">Gates</a><a href="memory.html">Memory</a><a href="tui.html">TUI</a><a href="configuration.html">Config</a><a href="security.html" aria-current="page">Security</a><a href="installation.html">Install</a><a href="troubleshooting.html">Troubleshoot</a><a href="reference.html">Reference</a></nav><div class="header-actions"><button class="icon-button" data-search-toggle aria-label="Search documentation" title="Search documentation (shortcut: /)">⌕</button><button class="icon-button" data-theme-toggle aria-label="Toggle color theme" title="Toggle color theme"><span data-theme-icon>◐</span></button><button class="icon-button nav-toggle" data-nav-toggle aria-expanded="false" aria-label="Toggle navigation">☰</button></div></div></header>
+<main id="main">
+<section class="page-hero"><div class="container"><div class="breadcrumbs"><a href="index.html">gx-dev</a> / Security</div><span class="eyebrow">Integrity controls</span><h1>Security &amp; integrity</h1><p class="lead">Repository and web content are untrusted data. Agents run with least capability, writes are confined to assigned worktrees, secrets never survive into logs or memory, and Git history stays untouched without explicit approval.</p><nav class="anchor-nav" aria-label="On this page"><a href="#injection">Prompt injection</a><a href="#trust">Project trust</a><a href="#paths">Paths &amp; writes</a><a href="#secrets">Secrets</a><a href="#commands">Commands</a><a href="#git">Git safety</a><a href="#approvals">Approvals</a></nav></div></section>
+
+<section class="section" id="injection"><div class="container"><div class="section-heading"><span class="eyebrow">Threat model</span><h2>Prompt injection defense</h2><p>Fetched pages, comments, issue bodies, and source files may contain instructions aimed at the agents. gx-dev treats all of it as data.</p></div>
+<div class="grid three">
+<article class="card"><h3>Untrusted data discipline</h3><p>Agents are instructed that web pages, repository files, and captured excerpts are observations, never directives. Embedded instructions cannot redefine agent policy, gates, or approval rules.</p></article>
+<article class="card"><h3>Sanitization</h3><p>Fetched material is sanitized before model exposure: markup stripped to content, suspicious instruction-like phrasing neutralized, and binary or oversized payloads rejected.</p></article>
+<article class="card"><h3>Delimiting &amp; provenance</h3><p>Every excerpt is wrapped in explicit delimiters and labeled with source, title, and retrieval date, so the model always knows what is quoted data versus operator instruction.</p></article>
+</div></div></section>
+
+<section class="section alt" id="trust"><div class="container"><div class="section-heading"><span class="eyebrow">Chain of authority</span><h2>Project trust before local configuration</h2><p>Project-local configuration and agent definitions are honored only after the user grants project trust. Until then, package-owned defaults apply.</p></div>
+<figure class="diagram">
+<svg viewBox="0 0 980 350" role="img" aria-label="Trust boundary diagram: the user and pi TUI delegate to the gx-dev orchestrator, which accepts only sanitized untrusted inputs and writes only inside the worktree boundary; git, secrets, evidence, and sibling worktrees are blocked targets.">
+  <defs><marker id="se-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker></defs>
+  <rect x="400" y="16" width="180" height="52" rx="12" class="dg-accent"/><text x="490" y="38" text-anchor="middle" class="dg-label">User + pi TUI</text><text x="490" y="56" text-anchor="middle" class="dg-sub">trusted · approvals</text>
+  <line x1="490" y1="68" x2="490" y2="104" class="dg-line" marker-end="url(#se-arrow)"/>
+  <rect x="300" y="106" width="380" height="64" rx="12" class="dg-accent"/><text x="490" y="130" text-anchor="middle" class="dg-label">gx-dev orchestrator</text><text x="490" y="150" text-anchor="middle" class="dg-sub">policy · state · gates — application logic</text>
+  <rect x="60" y="106" width="180" height="64" rx="12" class="dg-box"/><text x="150" y="130" text-anchor="middle" class="dg-label">Git repository</text><text x="150" y="150" text-anchor="middle" class="dg-sub">base commit + branches</text>
+  <line x1="240" y1="138" x2="298" y2="138" class="dg-line" marker-end="url(#se-arrow)"/><text x="269" y="128" text-anchor="middle" class="dg-sub">hashes</text>
+  <text x="60" y="222" class="dg-note">Allowed write boundary — worktrees only</text>
+  <rect x="60" y="230" width="560" height="80" rx="12" class="dg-box" stroke-dasharray="6 5"/>
+  <rect x="80" y="248" width="150" height="44" rx="10" class="dg-box"/><text x="155" y="275" text-anchor="middle" class="dg-sub">developer/</text>
+  <rect x="250" y="248" width="150" height="44" rx="10" class="dg-box"/><text x="325" y="275" text-anchor="middle" class="dg-sub">tests/</text>
+  <rect x="420" y="248" width="150" height="44" rx="10" class="dg-box"/><text x="495" y="275" text-anchor="middle" class="dg-sub">staging/</text>
+  <line x1="450" y1="170" x2="450" y2="228" class="dg-line" marker-end="url(#se-arrow)"/><text x="458" y="202" class="dg-sub">bounded writes</text>
+  <rect x="730" y="150" width="220" height="40" rx="10" class="dg-untrusted"/><text x="840" y="175" text-anchor="middle" class="dg-sub">web pages</text>
+  <rect x="730" y="202" width="220" height="40" rx="10" class="dg-untrusted"/><text x="840" y="227" text-anchor="middle" class="dg-sub">repo files &amp; issue text</text>
+  <rect x="730" y="254" width="220" height="40" rx="10" class="dg-untrusted"/><text x="840" y="279" text-anchor="middle" class="dg-sub">fetched excerpts</text>
+  <line x1="730" y1="170" x2="684" y2="148" class="dg-line" marker-end="url(#se-arrow)"/>
+  <line x1="730" y1="222" x2="684" y2="152" class="dg-line" marker-end="url(#se-arrow)"/>
+  <line x1="730" y1="274" x2="684" y2="158" class="dg-line" marker-end="url(#se-arrow)"/>
+  <text x="946" y="132" text-anchor="end" class="dg-note">sanitized · delimited · data only</text>
+  <rect x="730" y="308" width="220" height="36" rx="10" class="dg-danger"/><text x="840" y="331" text-anchor="middle" class="dg-sub">✕ .git/ · secrets · evidence · siblings</text>
+</svg>
+<figcaption>Untrusted inputs enter only through sanitization; writes are bounded to the run's own worktrees.</figcaption>
+</figure>
+<div class="grid two" style="margin-top:18px">
+<article class="card"><h3>Package-owned core agents</h3><p>Core agent prompts ship with the package, so a repository cannot redefine gates or reviewer authority by dropping files into project-local agent directories.</p></article>
+<article class="card"><h3>Explicit trust prompt</h3><p>Pi's project trust flow gates local configuration and agents. gx-dev never reads project-local overrides from an untrusted project.</p><span class="tag danger">Trust before config</span></article>
+</div></div></section>
+
+<section class="section" id="paths"><div class="container"><div class="section-heading"><span class="eyebrow">Filesystem</span><h2>Path canonicalization and write restrictions</h2></div>
+<div class="grid two">
+<article class="card"><h3>Canonical paths</h3><ul><li>All paths are resolved — symlinks, <code>..</code> segments, and junctions included — before use.</li><li>Every tool call is checked against the agent's assigned working directory.</li><li>Escape attempts are blocked and logged as events.</li></ul></article>
+<article class="card"><h3>Least capability</h3><ul><li>Each role receives only the tools its contract requires.</li><li>Developer and test writer cannot read each other's uncommitted work.</li><li>Read-oriented agents cannot edit production files at all.</li></ul></article>
+</div>
+<div class="table-wrap" style="margin-top:18px"><table><thead><tr><th>Blocked target</th><th>Rule</th></tr></thead><tbody>
+<tr><td><code>.git/</code> internals</td><td>Never written directly; all Git mutation goes through the bounded Git command layer.</td></tr>
+<tr><td>Secret files (<code>.env</code>, key stores, credentials)</td><td>Never read into prompts, memory, titles, or filenames.</td></tr>
+<tr><td>Immutable evidence</td><td>Append-only; captured artifacts are never edited or deleted by agents.</td></tr>
+<tr><td>Sibling worktrees</td><td>Each agent writes only in its own worktree — the anti-collusion boundary.</td></tr>
+<tr><td>User's working tree</td><td>Untouched except by the approved final integration step.</td></tr>
+</tbody></table></div></div></section>
+
+<section class="section alt" id="secrets"><div class="container"><div class="section-heading"><span class="eyebrow">Data protection</span><h2>Secret redaction</h2></div>
+<div class="grid three">
+<article class="card"><h3>Detection</h3><p>Credential-shaped strings — tokens, keys, passwords, connection strings — are detected by pattern before any text leaves the process boundary.</p></article>
+<article class="card"><h3>Redaction scope</h3><p>Redaction applies to logs, prompts, memory proposals, page titles, and filenames. Evidence stores references and hashes, not secrets.</p></article>
+<article class="card"><h3>Memory hygiene</h3><p><code>memory.redactSecrets</code> is on by default; promoted pages are scrubbed again at validation time, independent of the capture path.</p></article>
+</div></div></section>
+
+<section class="section" id="commands"><div class="container"><div class="section-heading"><span class="eyebrow">Process control</span><h2>Command timeout, truncation, and cancellation</h2></div>
+<div class="grid two">
+<article class="card"><h3>Bounded execution</h3><ul><li>Processes spawn with argument arrays — no shell interpolation.</li><li>Commands enforce <code>agents.timeoutMinutes</code>; expiry fails the attempt cleanly.</li><li>Output is truncated in the transcript and archived in full as evidence.</li></ul></article>
+<article class="card"><h3>Cancellation propagation</h3><ul><li>Pause, cancel, and shutdown signals propagate to all child pi processes.</li><li>Partial agent output is discarded; the attempt is recorded as interrupted.</li><li>State is persisted before and after, so recovery is idempotent.</li></ul></article>
+</div></div></section>
+
+<section class="section alt" id="git"><div class="container"><div class="section-heading"><span class="eyebrow">History protection</span><h2>Git safety</h2></div>
+<div class="grid two">
+<article class="card"><h3>Never without explicit approval</h3><ul class="check-list"><li><code>git reset --hard</code> and destructive checkout</li><li>Force pushes of any kind</li><li>History rewriting (rejected outright in v1 — <code>allowHistoryRewrite</code> cannot be enabled)</li><li>Broad deletion or removal of unrelated user changes</li></ul></article>
+<article class="card"><h3>Always</h3><ul><li>Record base branch, base commit, upstream, and dirty state before work starts.</li><li>Refuse to overwrite unrelated changes.</li><li>Resolve only mechanical conflicts automatically.</li><li>Record every commit with hash and rollback instructions.</li></ul></article>
+</div></div></section>
+
+<section class="section" id="approvals"><div class="container"><div class="section-heading"><span class="eyebrow">Non-repudiation</span><h2>Hash-linked approvals</h2><p>Approvals are bound to the exact artifacts they approved, so stale decisions cannot be reused silently.</p></div>
+<div class="grid three">
+<article class="card"><h3>What is hashed</h3><p>Requirements, plan, input revisions, and gate evidence are hashed at approval time and recorded in <code>state.json</code> and the event log.</p></article>
+<article class="card"><h3>Invalidation</h3><p>If any referenced artifact changes, the approval no longer applies: the workflow returns to the matching checkpoint instead of proceeding on stale authority.</p></article>
+<article class="card"><h3>Where it is visible</h3><p><code>/gx-dev history</code> and the evidence directory expose every approval with its hashes, question, and answer.</p></article>
+</div></div></section>
+</main>
+<footer class="site-footer"><div class="container footer-inner"><span>gx-dev planning documentation · <span data-year></span></span><div class="footer-links"><a href="installation.html">Next: Install</a><a href="delivery.html">Roadmap</a><a href="../PLAN.md">Full plan</a></div></div></footer><script src="assets/search-index.js"></script><script src="assets/site.js"></script><script src="assets/search.js"></script></body></html>

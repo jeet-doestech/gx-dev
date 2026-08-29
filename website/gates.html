@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="gx-dev test gate, review gate, five-failure escalation, and evidence requirements."><title>Gates &amp; escalation — gx-dev</title><link rel="stylesheet" href="assets/styles.css"><script>document.documentElement.dataset.theme=localStorage.getItem('gx-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')</script></head>
+<body><a class="skip-link" href="#main">Skip to content</a><header class="site-header"><div class="header-inner"><a class="brand" href="index.html"><span class="brand-mark">gx</span><span>gx-dev</span></a><nav class="site-nav" data-nav aria-label="Primary"><a href="index.html">Overview</a><a href="workflow.html">Workflow</a><a href="architecture.html">Architecture</a><a href="agents.html">Agents</a><a href="gates.html" aria-current="page">Gates</a><a href="memory.html">Memory</a><a href="tui.html">TUI</a><a href="configuration.html">Config</a><a href="security.html">Security</a><a href="installation.html">Install</a><a href="troubleshooting.html">Troubleshoot</a><a href="reference.html">Reference</a></nav><div class="header-actions"><button class="icon-button" data-search-toggle aria-label="Search documentation" title="Search documentation (shortcut: /)">⌕</button><button class="icon-button" data-theme-toggle aria-label="Toggle color theme" title="Toggle color theme"><span data-theme-icon>◐</span></button><button class="icon-button nav-toggle" data-nav-toggle aria-expanded="false" aria-label="Toggle navigation">☰</button></div></div></header>
+<main id="main">
+<section class="page-hero"><div class="container"><div class="breadcrumbs"><a href="index.html">gx-dev</a> / Gates</div><span class="eyebrow">Quality control</span><h1>Gates &amp; escalation</h1><p class="lead">Gates promote work on evidence, never confidence. The test gate verifies behavior; the review gate assumes green tests can still hide defects; five consecutive failures force holistic replanning.</p><nav class="anchor-nav" aria-label="On this page"><a href="#test-gate">Test gate</a><a href="#ownership">Ownership routing</a><a href="#review-gate">Review gate</a><a href="#escalation">Escalation</a><a href="#evidence">Evidence</a></nav></div></section>
+
+<section class="section" id="test-gate"><div class="container"><div class="section-heading"><span class="eyebrow">Gate one</span><h2>Integrated test gate</h2><p>Code and tests meet for the first time in the staging worktree, where verification is executed deterministically and recorded exactly.</p></div>
+<div class="grid three">
+<article class="card"><h3>Preflight checks</h3><ul><li>Meaningful implementation exists — no stub-only diffs.</li><li>Promised tests are present and enabled.</li><li>No constant-only or vacuous assertions.</li><li>No secrets, conflict markers, or unrelated changes.</li><li>No accidental vendor or generated files.</li></ul></article>
+<article class="card"><h3>Command allowlist</h3><p>Only allowlisted verification commands execute. The allowlist is assembled from project manifests, CI configuration, and user settings; anything outside it must be discovered, justified, and recorded first.</p><ul><li>Exact argv, environment summary, and exit code persisted.</li><li>Destructive and network commands denied by default.</li><li>Output truncated in-place, archived in full as evidence.</li></ul></article>
+<article class="card"><h3>Deterministic execution</h3><ul><li>Developer and test branches integrate into staging.</li><li>Only mechanical conflicts resolve automatically.</li><li>Project-native discovery: package scripts, Makefiles, CI steps.</li><li>Valid tests are never weakened or deleted to obtain a pass.</li><li>Every code-changing repair invalidates prior assurance.</li></ul></article>
+</div></div></section>
+
+<section class="section alt" id="ownership"><div class="container"><div class="section-heading"><span class="eyebrow">Routing</span><h2>Failures go to the responsible owner</h2><p>The test runner compares failures against requirements and classifies ownership before anything is retried.</p></div>
+<div class="table-wrap"><table><thead><tr><th>Observed failure</th><th>Routed to</th><th>Counter consumed</th></tr></thead><tbody>
+<tr><td>Valid test fails against the implementation</td><td>Developer</td><td><code>testConsecutiveFailures</code></td></tr>
+<tr><td>Missing, disabled, or invalid test coverage</td><td>Test writer</td><td><code>testConsecutiveFailures</code></td></tr>
+<tr><td>Contract mismatch between code and tests</td><td>Developer + test writer</td><td><code>testConsecutiveFailures</code></td></tr>
+<tr><td>Environment, tooling, network, or timeout</td><td>Orchestrator (infrastructure retry)</td><td><code>infrastructureRetries</code></td></tr>
+<tr><td>Branch integration conflict that is not mechanical</td><td>Semantic conflict returned to relevant agent</td><td><code>integrationConsecutiveFailures</code></td></tr>
+</tbody></table></div>
+<div class="callout"><strong>Repetition is not progress.</strong> Repeating the same command without a meaningful change counts as another failure on the same counter.</div>
+</div></section>
+
+<section class="section" id="review-gate"><div class="container"><div class="section-heading"><span class="eyebrow">Gate two</span><h2>Adversarial review severity model</h2><p>The reviewer inspects the combined staged diff for correctness, security, data loss, performance, test quality, and hidden coupling — and returns severity-ranked findings with paths, lines, evidence, and remediation.</p></div>
+<div class="table-wrap"><table><thead><tr><th>Severity</th><th>Effect in v1</th><th>Disposition</th></tr></thead><tbody>
+<tr><td><span class="tag danger">Blocking</span></td><td>Gate fails; promotion is blocked</td><td>Must be fixed. Only explicit user authority may accept material residual risk.</td></tr>
+<tr><td><span class="tag danger">Major</span></td><td>Blocks in v1</td><td>Treated as blocking: fix, or escalate the decision to the user.</td></tr>
+<tr><td><span class="tag warning">Minor</span></td><td>Advisory</td><td>Recorded in evidence and batched as follow-up work.</td></tr>
+<tr><td><span class="tag">Info</span></td><td>Advisory</td><td>Logged for context; never blocks.</td></tr>
+</tbody></table></div>
+<div class="callout warning"><strong>Reviewers cannot waive blocking findings.</strong> Developer and reviewer may not negotiate acceptance privately; documentation updates begin only after the review gate passes.</div>
+</div></section>
+
+<section class="section alt" id="escalation"><div class="container"><div class="section-heading"><span class="eyebrow">Escalation</span><h2>Five failures force holistic replanning</h2><p>Each gate keeps its own consecutive-failure counter. A pass resets only its own counter; infrastructure retries never count as code or test failures.</p></div>
+<figure class="diagram">
+<svg viewBox="0 0 980 300" role="img" aria-label="Gate flow diagram: developer and test-writer worktrees integrate in staging, then pass through the test gate and review gate. Failures route to ownership routing, and five consecutive failures trigger replanning with the full history.">
+  <defs><marker id="gd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker></defs>
+  <rect x="20" y="40" width="130" height="56" rx="12" class="dg-box"/><text x="85" y="63" text-anchor="middle" class="dg-label">Developer</text><text x="85" y="81" text-anchor="middle" class="dg-sub">implementation</text>
+  <rect x="20" y="120" width="130" height="56" rx="12" class="dg-box"/><text x="85" y="143" text-anchor="middle" class="dg-label">Test writer</text><text x="85" y="161" text-anchor="middle" class="dg-sub">independent tests</text>
+  <rect x="215" y="80" width="140" height="56" rx="12" class="dg-box"/><text x="285" y="103" text-anchor="middle" class="dg-label">Staging</text><text x="285" y="121" text-anchor="middle" class="dg-sub">integration</text>
+  <rect x="410" y="80" width="130" height="56" rx="12" class="dg-accent"/><text x="475" y="103" text-anchor="middle" class="dg-label">Test gate</text><text x="475" y="121" text-anchor="middle" class="dg-sub">verify + evidence</text>
+  <rect x="595" y="80" width="130" height="56" rx="12" class="dg-accent"/><text x="660" y="103" text-anchor="middle" class="dg-label">Review gate</text><text x="660" y="121" text-anchor="middle" class="dg-sub">adversarial</text>
+  <rect x="790" y="80" width="160" height="56" rx="12" class="dg-box"/><text x="870" y="103" text-anchor="middle" class="dg-label">Docs + commit</text><text x="870" y="121" text-anchor="middle" class="dg-sub">traceable result</text>
+  <rect x="455" y="210" width="220" height="56" rx="12" class="dg-box"/><text x="565" y="233" text-anchor="middle" class="dg-label">Ownership routing</text><text x="565" y="251" text-anchor="middle" class="dg-sub">developer · tests · both · infra</text>
+  <rect x="730" y="210" width="190" height="56" rx="12" class="dg-warn"/><text x="825" y="233" text-anchor="middle" class="dg-label">5 consecutive failures</text><text x="825" y="251" text-anchor="middle" class="dg-sub">REPLAN with full history</text>
+  <line x1="150" y1="68" x2="213" y2="98" class="dg-line" marker-end="url(#gd-arrow)"/>
+  <line x1="150" y1="148" x2="213" y2="118" class="dg-line" marker-end="url(#gd-arrow)"/>
+  <line x1="355" y1="108" x2="408" y2="108" class="dg-line" marker-end="url(#gd-arrow)"/>
+  <line x1="540" y1="108" x2="593" y2="108" class="dg-line" marker-end="url(#gd-arrow)"/><text x="566" y="98" text-anchor="middle" class="dg-sub">pass</text>
+  <line x1="725" y1="108" x2="788" y2="108" class="dg-line" marker-end="url(#gd-arrow)"/><text x="756" y="98" text-anchor="middle" class="dg-sub">pass</text>
+  <line x1="475" y1="136" x2="517" y2="208" class="dg-line" marker-end="url(#gd-arrow)"/><text x="486" y="176" class="dg-sub">fail</text>
+  <line x1="660" y1="136" x2="613" y2="208" class="dg-line" marker-end="url(#gd-arrow)"/><text x="652" y="176" class="dg-sub">fail</text>
+  <line x1="675" y1="238" x2="728" y2="238" class="dg-line" marker-end="url(#gd-arrow)"/><text x="701" y="228" text-anchor="middle" class="dg-sub">5×</text>
+</svg>
+<figcaption>Both gates escalate independently; infrastructure retries stay outside the five-failure budget.</figcaption>
+</figure>
+<div class="table-wrap"><table><thead><tr><th>Counter</th><th>Scope</th><th>At limit</th></tr></thead><tbody>
+<tr><td><code>testConsecutiveFailures</code></td><td>Integrated test gate</td><td>Stop local repair; send full attempt history to the planner.</td></tr>
+<tr><td><code>reviewConsecutiveFailures</code></td><td>Adversarial review gate</td><td>Same rule, applied independently of test failures.</td></tr>
+<tr><td><code>integrationConsecutiveFailures</code></td><td>Non-mechanical merge conflicts</td><td>Semantic conflicts return to the responsible agent; repeated conflicts escalate.</td></tr>
+<tr><td><code>infrastructureRetries</code></td><td>Timeouts, model errors, tooling</td><td>Retried separately; never consumes a gate's five-failure budget.</td></tr>
+<tr><td><code>maxTotalAttempts</code></td><td>All attempts combined</td><td>Configurable ceiling prevents infinite loops before replanning can.</td></tr>
+</tbody></table></div>
+</div></section>
+
+<section class="section" id="evidence"><div class="container"><div class="section-heading"><span class="eyebrow">Auditability</span><h2>Evidence requirements per outcome</h2><p>Every gate verdict cites its evidence. Nothing is trusted because an agent asserted it.</p></div>
+<div class="grid two">
+<article class="card"><h3>On pass</h3><ul class="check-list"><li>Exact verification commands, environment, and exit codes.</li><li>Integrated staging revision hash under test.</li><li>Review findings with severities and their resolutions.</li><li>Documentation diff verified against actual behavior.</li><li>Gate verdict record with requirement, plan, and evidence hashes.</li></ul></article>
+<article class="card"><h3>On fail</h3><ul><li>Failing command, exit code, and archived output reference.</li><li>Minimal reproduction and the requirement it violates.</li><li>Ownership classification: developer, test writer, both, or infrastructure.</li><li>Attempt record: input revision hashes, changed files, responsible agent, proposed root cause, action taken, resulting state.</li><li>Preserved evidence links — the causal history the planner will receive.</li></ul></article>
+</div>
+<div class="callout danger"><strong>Never discard history.</strong> After five consecutive failures the planner receives the complete failure record; local repair stops before context is lost.</div>
+</div></section>
+</main>
+<footer class="site-footer"><div class="container footer-inner"><span>gx-dev planning documentation · <span data-year></span></span><div class="footer-links"><a href="memory.html">Next: Memory</a><a href="delivery.html">Roadmap</a><a href="../PLAN.md">Full plan</a></div></div></footer><script src="assets/search-index.js"></script><script src="assets/site.js"></script><script src="assets/search.js"></script></body></html>

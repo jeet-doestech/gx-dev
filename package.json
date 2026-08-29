@@ -1,0 +1,32 @@
+{
+  "name": "gx-dev",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Deterministic, evidence-based multi-agent feature delivery for the pi coding agent.",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "files": [
+    "extensions",
+    "agents",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": "./extensions/gx-dev/index.ts"
+  },
+  "scripts": {
+    "test": "node --test 'tests/unit/*.test.ts' 'tests/integration/*.test.ts' 'tests/e2e/*.test.ts'",
+    "test:unit": "node --test 'tests/unit/*.test.ts'",
+    "typecheck": "tsc --noEmit",
+    "sample": "node scripts/sample-workflow.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.0"
+  }
+}

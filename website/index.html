@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="gx-dev: an evidence-gated multi-agent development workflow for pi.">
+  <title>gx-dev — Multi-agent feature delivery for pi</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script>document.documentElement.dataset.theme=localStorage.getItem('gx-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header"><div class="header-inner">
+  <a class="brand" href="index.html"><span class="brand-mark">gx</span><span>gx-dev</span></a>
+  <nav class="site-nav" data-nav aria-label="Primary">
+    <a href="index.html" aria-current="page">Overview</a><a href="workflow.html">Workflow</a><a href="architecture.html">Architecture</a><a href="agents.html">Agents</a><a href="gates.html">Gates</a><a href="memory.html">Memory</a><a href="tui.html">TUI</a><a href="configuration.html">Config</a><a href="security.html">Security</a><a href="installation.html">Install</a><a href="troubleshooting.html">Troubleshoot</a><a href="reference.html">Reference</a>
+  </nav>
+  <div class="header-actions"><button class="icon-button" data-search-toggle aria-label="Search documentation" title="Search documentation (shortcut: /)">⌕</button><button class="icon-button" data-theme-toggle aria-label="Toggle color theme" title="Toggle color theme"><span data-theme-icon>◐</span></button><button class="icon-button nav-toggle" data-nav-toggle aria-expanded="false" aria-label="Toggle navigation">☰</button></div>
+</div></header>
+<main id="main">
+  <section class="hero"><div class="container">
+    <span class="eyebrow">Development plan</span>
+    <h1>Independent agents.<br>One accountable conductor.</h1>
+    <p class="lead">gx-dev is a proposed pi TUI extension that turns a story or feature request into researched, planned, independently implemented, tested, adversarially reviewed, documented, and committed code.</p>
+    <div class="hero-actions"><a class="button primary" href="workflow.html">Explore the workflow →</a><a class="button" href="../PLAN.md">Read the source plan</a></div>
+    <div class="hero-metrics" aria-label="Plan highlights">
+      <div class="metric"><strong>7</strong><span>specialized subagents</span></div>
+      <div class="metric"><strong>3</strong><span>isolated Git worktrees</span></div>
+      <div class="metric"><strong>5×</strong><span>failures before replanning</span></div>
+      <div class="metric"><strong>1</strong><span>orchestrator-controlled state machine</span></div>
+    </div>
+  </div></section>
+
+  <section class="section alt"><div class="container">
+    <div class="section-heading"><span class="eyebrow">Core proposition</span><h2>Non-deterministic work, deterministic gates</h2><p>Agents can reason creatively, but they cannot promote themselves. gx-dev controls transitions using structured artifacts, Git state, executable verification, and review evidence.</p></div>
+    <div class="grid three">
+      <article class="card"><span class="card-number">01 / ISOLATE</span><h3>Independent implementation</h3><p>Developer and test-writer begin from the same approved contract in separate worktrees, reducing test-to-code collusion.</p></article>
+      <article class="card"><span class="card-number">02 / VERIFY</span><h3>Evidence-based gates</h3><p>Exact commands, exit codes, diffs, findings, and revision hashes—not confidence—determine progress.</p></article>
+      <article class="card"><span class="card-number">03 / COMPOUND</span><h3>Reviewed project memory</h3><p>Raw captures remain evidence. Only reviewed, provenance-backed conclusions become durable memory.</p></article>
+    </div>
+  </div></section>
+
+  <section class="section"><div class="container">
+    <div class="section-heading"><span class="eyebrow">At a glance</span><h2>The delivery line</h2></div>
+    <div class="flow" aria-label="High-level workflow">
+      <div class="flow-step"><strong>Research</strong><span>repo + web</span></div>
+      <div class="flow-step gate"><strong>Approve</strong><span>requirements</span></div>
+      <div class="flow-step"><strong>Plan</strong><span>code + tests</span></div>
+      <div class="flow-step"><strong>Build</strong><span>in parallel</span></div>
+      <div class="flow-step gate"><strong>Test</strong><span>integrated gate</span></div>
+      <div class="flow-step gate"><strong>Review</strong><span>adversarial</span></div>
+      <div class="flow-step"><strong>Commit</strong><span>reversible</span></div>
+    </div>
+    <div class="callout"><strong>The orchestrator is not another unchecked agent.</strong> It is application logic assisted by constrained reasoning, with no authority to bypass user checkpoints or evidence gates.</div>
+  </div></section>
+
+  <section class="section alt"><div class="container">
+    <div class="section-heading"><span class="eyebrow">Operating contract</span><h2>Where humans stay in control</h2></div>
+    <div class="grid two">
+      <article class="card"><h3>Always ask the user</h3><ul class="check-list"><li>Clarified requirements</li><li>Architecture and implementation plan</li><li>Destructive or difficult-to-reverse operations</li><li>Material API, security, dependency, framework, or migration decisions</li><li>Ambiguity exposed after repeated failures</li></ul></article>
+      <article class="card"><h3>May proceed automatically</h3><ul class="check-list"><li>Minor reversible operational corrections</li><li>Approved implementation and test tasks</li><li>Mechanical verification and evidence collection</li><li>Reviewer-verified documentation updates</li><li>Final commit after every gate passes</li></ul></article>
+    </div>
+  </div></section>
+
+  <section class="section"><div class="container">
+    <div class="section-heading"><span class="eyebrow">Explore</span><h2>Documentation</h2><p>Twelve pages cover the full system, from state machine to schemas.</p></div>
+    <div class="callout"><strong>Implementation status:</strong> the package ships with every subagent defaulted to <code>zai/glm-5.3-flash:max</code> — GLM-5.3-Flash at maximum thinking — configurable per role or via <code>inherit</code>. See <a href="configuration.html">Configuration</a>.</div>
+    <div class="grid three" style="margin-top:18px">
+      <a class="card" href="workflow.html"><h3>Workflow & gates →</h3><p>State transitions, retries, escalation, and user checkpoints.</p></a>
+      <a class="card" href="architecture.html"><h3>Architecture & Git →</h3><p>Process isolation, worktrees, integration, security, and recovery.</p></a>
+      <a class="card" href="agents.html"><h3>Agent contracts →</h3><p>Responsibilities, boundaries, inputs, and structured outputs.</p></a>
+      <a class="card" href="gates.html"><h3>Gates & escalation →</h3><p>Test gate, review severity, five-failure counters, and evidence.</p></a>
+      <a class="card" href="memory.html"><h3>Compounding memory →</h3><p>Evidence, reviewed wiki, provenance, pins, and linting.</p></a>
+      <a class="card" href="tui.html"><h3>TUI reference →</h3><p>Commands, dashboard, status widget, and modal questions.</p></a>
+      <a class="card" href="configuration.html"><h3>Configuration →</h3><p>Every key, type, default, and validation constraint.</p></a>
+      <a class="card" href="security.html"><h3>Security & integrity →</h3><p>Prompt injection, project trust, secrets, and Git safety.</p></a>
+      <a class="card" href="installation.html"><h3>Installation →</h3><p>Registry, Git, and local installs; first run and upgrades.</p></a>
+      <a class="card" href="troubleshooting.html"><h3>Troubleshooting →</h3><p>Refusals, retries, recovery, and validation errors.</p></a>
+      <a class="card" href="reference.html"><h3>Reference & schemas →</h3><p>State, events, completions, evidence, and frontmatter.</p></a>
+      <a class="card" href="delivery.html"><h3>Delivery roadmap →</h3><p>Implementation phases, testing strategy, scope, and completion.</p></a>
+      <a class="card" href="../PLAN.md"><h3>Full Markdown plan →</h3><p>The authoritative detailed development plan.</p></a>
+    </div>
+  </div></section>
+</main>
+<footer class="site-footer"><div class="container footer-inner"><span>gx-dev planning documentation · <span data-year></span></span><div class="footer-links"><a href="../PLAN.md">Markdown plan</a><a href="delivery.html">Roadmap</a><a href="https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f">LLM Wiki reference</a></div></div></footer>
+<script src="assets/search-index.js"></script><script src="assets/site.js"></script><script src="assets/search.js"></script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="gx-dev TUI reference: commands, dashboard, status widget, and modal questions."><title>TUI reference — gx-dev</title><link rel="stylesheet" href="assets/styles.css"><script>document.documentElement.dataset.theme=localStorage.getItem('gx-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')</script></head>
+<body><a class="skip-link" href="#main">Skip to content</a><header class="site-header"><div class="header-inner"><a class="brand" href="index.html"><span class="brand-mark">gx</span><span>gx-dev</span></a><nav class="site-nav" data-nav aria-label="Primary"><a href="index.html">Overview</a><a href="workflow.html">Workflow</a><a href="architecture.html">Architecture</a><a href="agents.html">Agents</a><a href="gates.html">Gates</a><a href="memory.html">Memory</a><a href="tui.html" aria-current="page">TUI</a><a href="configuration.html">Config</a><a href="security.html">Security</a><a href="installation.html">Install</a><a href="troubleshooting.html">Troubleshoot</a><a href="reference.html">Reference</a></nav><div class="header-actions"><button class="icon-button" data-search-toggle aria-label="Search documentation" title="Search documentation (shortcut: /)">⌕</button><button class="icon-button" data-theme-toggle aria-label="Toggle color theme" title="Toggle color theme"><span data-theme-icon>◐</span></button><button class="icon-button nav-toggle" data-nav-toggle aria-expanded="false" aria-label="Toggle navigation">☰</button></div></div></header>
+<main id="main">
+<section class="page-hero"><div class="container"><div class="breadcrumbs"><a href="index.html">gx-dev</a> / TUI</div><span class="eyebrow">Terminal control surface</span><h1>TUI reference</h1><p class="lead">Every workflow is monitored and controlled from pi's terminal interface: seventeen commands, a full-screen dashboard, a persistent footer status, and a modal question flow — rendered with the active theme, never hard-coded colors.</p><nav class="anchor-nav" aria-label="On this page"><a href="#commands">Commands</a><a href="#models">Model picker</a><a href="#dashboard">Dashboard</a><a href="#status">Status widget</a><a href="#questions">Modal questions</a></nav></div></section>
+
+<section class="section" id="commands"><div class="container"><div class="section-heading"><span class="eyebrow">Command surface</span><h2>The /gx-dev command set</h2><p>All commands are namespaced under <code>/gx-dev</code> and operate on the currently selected run unless a run id is given.</p></div>
+<div class="table-wrap"><table><thead><tr><th>Command</th><th>Usage</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>start</code></td><td><code>/gx-dev start &lt;request&gt;</code></td><td>Begin a new run from a short feature request; enters intake and research.</td></tr>
+<tr><td><code>story</code></td><td><code>/gx-dev story &lt;path-or-text&gt;</code></td><td>Load a story from a file path or literal text as the run input.</td></tr>
+<tr><td><code>status</code></td><td><code>/gx-dev status</code></td><td>Show the current run, state, gate results, failure counters, and open questions.</td></tr>
+<tr><td><code>dashboard</code></td><td><code>/gx-dev dashboard</code></td><td>Open the full-screen dashboard: state graph, active agents, worktrees, events, gates, and usage.</td></tr>
+<tr><td><code>answer</code></td><td><code>/gx-dev answer</code></td><td>Respond to the pending question raised through the modal interface.</td></tr>
+<tr><td><code>pause</code></td><td><code>/gx-dev pause</code></td><td>Checkpoint state and pause; child processes stop cleanly and work is preserved.</td></tr>
+<tr><td><code>resume</code></td><td><code>/gx-dev resume [run-id]</code></td><td>Reconcile persisted state against live Git, then continue a paused or interrupted run.</td></tr>
+<tr><td><code>cancel</code></td><td><code>/gx-dev cancel</code></td><td>Cancel the run, propagate cancellation to all children, and retain evidence.</td></tr>
+<tr><td><code>history</code></td><td><code>/gx-dev history</code></td><td>Browse the append-only event log and per-attempt failure history.</td></tr>
+<tr><td><code>evidence</code></td><td><code>/gx-dev evidence</code></td><td>Open the evidence directory for the current run.</td></tr>
+<tr><td><code>retry</code></td><td><code>/gx-dev retry</code></td><td>Re-run the last failed agent or gate step after the cause has been addressed.</td></tr>
+<tr><td><code>rollback</code></td><td><code>/gx-dev rollback [run-id|commit]</code></td><td>Reverse a recorded commit using its documented rollback command.</td></tr>
+<tr><td><code>cleanup</code></td><td><code>/gx-dev cleanup</code></td><td>Remove worktrees and branches for finished or cancelled runs, subject to retention policy.</td></tr>
+<tr><td><code>config</code></td><td><code>/gx-dev config</code></td><td>Show the effective configuration and validation results for this project.</td></tr>
+<tr><td><code>models</code></td><td><code>/gx-dev models</code></td><td>Open the per-subagent model picker: choose a role, then a model and thinking level from your own pi setup.</td></tr>
+<tr><td><code>models set</code></td><td><code>/gx-dev models set &lt;role&gt; &lt;spec&gt;</code></td><td>Persist one selection directly, e.g. <code>set reviewer zai/glm-5.3-flash:max</code>; <code>inherit</code> delegates the role to the session model.</td></tr>
+<tr><td><code>models show</code></td><td><code>/gx-dev models show</code></td><td>Print each role's resolved model and its source: explicit selection, role-prompt pin, or built-in default.</td></tr>
+<tr><td><code>memory</code></td><td><code>/gx-dev memory</code></td><td>Browse reviewed memory pages, pending proposals, and lint findings.</td></tr>
+<tr><td><code>doctor</code></td><td><code>/gx-dev doctor</code></td><td>Diagnose the environment: Node, Git, trust, config, worktrees, and memory health.</td></tr>
+</tbody></table></div>
+<div class="section-heading" id="models" style="margin-top:52px"><span class="eyebrow">Per-subagent models</span><h3>The model picker</h3><p><code>/gx-dev models</code> sets the model for each of the seven subagents — researcher, planner, developer, testWriter, testRunner, reviewer, committer — from your own pi setup. Model discovery is registry-first: candidates come from pi's model registry, with a CLI fallback (<code>pi --list-models</code>) when the registry is unavailable. Unmatched picks warn but never block — see <a href="troubleshooting.html#config">troubleshooting</a>.</p></div>
+<div class="flow" aria-label="Model picker flow">
+<div class="flow-step"><strong>Roles</strong><span>pick one of the seven</span></div>
+<div class="flow-step"><strong>Models</strong><span>registry list · thinking badges · inherit · clear override</span></div>
+<div class="flow-step"><strong>Thinking</strong><span>off → max, when supported</span></div>
+<div class="flow-step gate"><strong>Persisted</strong><span>atomic write to config.json</span></div>
+<div class="flow-step"><strong>Rebuilt</strong><span>engine rebuilt for the next spawn</span></div>
+</div>
+<div class="grid two">
+<article class="card"><h3>In the model list</h3><ul><li>Each candidate shows its thinking levels as badges, so the model and the reasoning budget are chosen together.</li><li><code>inherit</code> delegates the role to the session's default model — the child is spawned without <code>--model</code>.</li><li>A <em>clear override</em> entry removes the role's key so the package pin or built-in default applies again.</li></ul></article>
+<article class="card"><h3>On save</h3><ul><li>The selection is persisted to <code>agents.models.&lt;role&gt;</code> in <code>.gx-dev/config.json</code> with an atomic write.</li><li>The engine is rebuilt immediately, so the next dispatch of that role uses the new model — no restart needed.</li><li>Prefer the shell? <code>scripts/models.mjs show|list|set|unset|get</code> drives the same store — see <a href="configuration.html#model-selection">configuration</a>.</li></ul></article>
+</div>
+</div></section>
+
+<section class="section alt" id="dashboard"><div class="container"><div class="section-heading"><span class="eyebrow">Full-screen view</span><h2>Dashboard</h2><p>The dashboard shows the state graph with the current position, failure counters, recent events, gate progress, worktree status, and token/cost usage in one screen.</p></div>
+<figure class="diagram">
+<svg viewBox="0 0 980 440" role="img" aria-label="Dashboard mockup: a terminal panel with a state graph on the left showing completed and current states, failure counters below, and a recent-events panel plus gates and usage panel on the right.">
+  <defs><marker id="tu-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker></defs>
+  <rect x="10" y="10" width="960" height="420" rx="16" class="dg-box"/>
+  <circle cx="36" cy="32" r="4" class="dg-note"/><circle cx="52" cy="32" r="4" class="dg-note"/><circle cx="68" cy="32" r="4" class="dg-note"/>
+  <text x="88" y="37" class="dg-label">gx-dev · run gx-014 · story: retry-aware streaming client</text>
+  <line x1="10" y1="54" x2="970" y2="54" class="dg-line"/>
+  <text x="30" y="82" class="dg-label">State graph</text>
+  <circle cx="44" cy="104" r="5" class="dg-note"/><text x="58" y="108" class="dg-sub">INTAKE ✓</text>
+  <circle cx="44" cy="130" r="5" class="dg-note"/><text x="58" y="134" class="dg-sub">RESEARCH ✓</text>
+  <circle cx="44" cy="156" r="5" class="dg-note"/><text x="58" y="160" class="dg-sub">REQUIREMENTS_APPROVAL ✓</text>
+  <circle cx="44" cy="182" r="5" class="dg-note"/><text x="58" y="186" class="dg-sub">PLAN ✓</text>
+  <circle cx="44" cy="208" r="5" class="dg-note"/><text x="58" y="212" class="dg-sub">BUILD ✓ (parallel)</text>
+  <circle cx="44" cy="234" r="5" class="dg-note"/><text x="58" y="238" class="dg-sub">INTEGRATE ✓</text>
+  <circle cx="44" cy="260" r="6" fill="currentColor" stroke="none"/><text x="58" y="264" class="dg-accent-text">TEST_GATE ● current</text>
+  <circle cx="44" cy="286" r="5" class="dg-untrusted"/><text x="58" y="290" class="dg-sub">REVIEW_GATE</text>
+  <circle cx="44" cy="312" r="5" class="dg-untrusted"/><text x="58" y="316" class="dg-sub">FINAL_VERIFICATION</text>
+  <circle cx="44" cy="338" r="5" class="dg-untrusted"/><text x="58" y="342" class="dg-sub">COMMIT</text>
+  <line x1="36" y1="240" x2="36" y2="256" class="dg-line" marker-end="url(#tu-arrow)"/>
+  <text x="30" y="378" class="dg-label">Counters</text>
+  <text x="30" y="400" class="dg-note">test 2/5 · review 0/5 · integration 1/5 · infra 1</text>
+  <line x1="320" y1="70" x2="320" y2="410" class="dg-line"/>
+  <text x="340" y="82" class="dg-label">Recent events</text>
+  <text x="340" y="106" class="dg-sub">14:02:11  AGENT_COMPLETED   role=developer</text>
+  <text x="340" y="126" class="dg-sub">14:02:12  STATE_TRANSITIONED INTEGRATE→TEST_GATE</text>
+  <text x="340" y="146" class="dg-sub">14:02:13  GATE_EVALUATED    gate=test verdict=running</text>
+  <text x="340" y="166" class="dg-sub">14:01:58  WORKTREE_MERGED   tests→staging</text>
+  <text x="340" y="186" class="dg-sub">14:01:40  AGENT_COMPLETED   role=test-writer</text>
+  <text x="340" y="206" class="dg-sub">14:01:22  APPROVAL_RECORDED plan=9f31c2…</text>
+  <line x1="340" y1="224" x2="950" y2="224" class="dg-line"/>
+  <text x="340" y="250" class="dg-label">Gates &amp; usage</text>
+  <text x="340" y="274" class="dg-sub">test gate    npm test --workspaces   exit pending</text>
+  <text x="340" y="294" class="dg-sub">review gate  queued</text>
+  <text x="340" y="314" class="dg-sub">worktrees    developer ✓  tests ✓  staging ✓</text>
+  <text x="340" y="334" class="dg-sub">tokens       148k in · 22k out · est. $0.41</text>
+  <text x="340" y="354" class="dg-sub">agents       developer idle · test-writer idle</text>
+  <rect x="340" y="374" width="132" height="24" rx="12" class="dg-accent"/><text x="406" y="390" text-anchor="middle" class="dg-sub">expand agent output</text>
+</svg>
+<figcaption>Dashboard mockup: state graph and counters on the left; events, gates, worktrees, and usage on the right. Colors follow pi's active theme.</figcaption>
+</figure>
+<div class="grid three">
+<div class="card"><h3>State graph</h3><p>Canonical states with completed, current, and pending markers, plus per-gate failure counters against their limits.</p></div>
+<div class="card"><h3>Active agents</h3><p>Role, model, worktree, and streaming output, expandable without leaving the dashboard.</p></div>
+<div class="card"><h3>Events &amp; usage</h3><p>A tail of the append-only event log alongside token and cost accounting for the run.</p></div>
+</div></div></section>
+
+<section class="section" id="status"><div class="container"><div class="section-heading"><span class="eyebrow">Always visible</span><h2>Footer status widget</h2></div>
+<div class="grid two">
+<article class="card"><h3>Footer status</h3><p>Pi's footer shows the selected run id, current stage, elapsed time, and failure counters at a glance, so a run can be supervised from any buffer.</p><pre><code>gx-014 · TEST_GATE · 12m41s · test 2/5 review 0/5</code></pre></article>
+<article class="card"><h3>Compact workflow widget</h3><p>Above the editor, a one-line widget mirrors the canonical path and highlights the active state, mirroring the state graph without opening the dashboard.</p><p class="muted">Both widgets render through pi's theme-aware renderers: no hard-coded colors, native light and dark operation.</p></article>
+</div></div></section>
+
+<section class="section alt" id="questions"><div class="container"><div class="section-heading"><span class="eyebrow">Human authority</span><h2>Modal question flow</h2><p>Material decisions surface as a modal; minor reversible ones are answered by the orchestrator and logged.</p></div>
+<div class="flow" aria-label="Modal question flow">
+<div class="flow-step"><strong>Raised</strong><span>ambiguity found</span></div>
+<div class="flow-step"><strong>Classified</strong><span>minor vs material</span></div>
+<div class="flow-step gate"><strong>Modal</strong><span>context + options</span></div>
+<div class="flow-step"><strong>Answered</strong><span>user decides</span></div>
+<div class="flow-step gate"><strong>Recorded</strong><span>hash-linked approval</span></div>
+<div class="flow-step"><strong>Resumed</strong><span>state continues</span></div>
+</div>
+<div class="grid two">
+<div class="card"><h3>What the modal shows</h3><ul><li>The question, with the material decision stated plainly.</li><li>Linked artifacts: requirements, plan sections, evidence.</li><li>Available options and their consequences.</li><li>Which checkpoint this satisfies.</li></ul></div>
+<div class="card"><h3>Rules</h3><ul><li>Answers are persisted with artifact hashes before work resumes.</li><li>Stale approvals cannot be reused against changed inputs.</li><li>An absent user moves the run to <code>WAITING_FOR_USER</code>, checkpointed and resumable.</li><li>Every question and answer appears in <code>/gx-dev history</code>.</li></ul></div>
+</div></div></section>
+</main>
+<footer class="site-footer"><div class="container footer-inner"><span>gx-dev planning documentation · <span data-year></span></span><div class="footer-links"><a href="configuration.html">Next: Config</a><a href="delivery.html">Roadmap</a><a href="../PLAN.md">Full plan</a></div></div></footer><script src="assets/search-index.js"></script><script src="assets/site.js"></script><script src="assets/search.js"></script></body></html>

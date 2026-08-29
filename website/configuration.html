@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="gx-dev configuration model: every key, type, default, and constraint."><title>Configuration — gx-dev</title><link rel="stylesheet" href="assets/styles.css"><script>document.documentElement.dataset.theme=localStorage.getItem('gx-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')</script></head>
+<body><a class="skip-link" href="#main">Skip to content</a><header class="site-header"><div class="header-inner"><a class="brand" href="index.html"><span class="brand-mark">gx</span><span>gx-dev</span></a><nav class="site-nav" data-nav aria-label="Primary"><a href="index.html">Overview</a><a href="workflow.html">Workflow</a><a href="architecture.html">Architecture</a><a href="agents.html">Agents</a><a href="gates.html">Gates</a><a href="memory.html">Memory</a><a href="tui.html">TUI</a><a href="configuration.html" aria-current="page">Config</a><a href="security.html">Security</a><a href="installation.html">Install</a><a href="troubleshooting.html">Troubleshoot</a><a href="reference.html">Reference</a></nav><div class="header-actions"><button class="icon-button" data-search-toggle aria-label="Search documentation" title="Search documentation (shortcut: /)">⌕</button><button class="icon-button" data-theme-toggle aria-label="Toggle color theme" title="Toggle color theme"><span data-theme-icon>◐</span></button><button class="icon-button nav-toggle" data-nav-toggle aria-expanded="false" aria-label="Toggle navigation">☰</button></div></div></header>
+<main id="main">
+<section class="page-hero"><div class="container"><div class="breadcrumbs"><a href="index.html">gx-dev</a> / Config</div><span class="eyebrow">Declarative settings</span><h1>Configuration</h1><p class="lead">One JSON document controls concurrency, timeouts, attempt limits, gate policy, research, memory, and Git behavior. Unknown keys, wrong types, and out-of-range values are rejected at load time.</p><nav class="anchor-nav" aria-label="On this page"><a href="#example">Example</a><a href="#keys">Key reference</a><a href="#models">Model defaults</a><a href="#model-selection">Model selection</a><a href="#groups">Flag groups</a><a href="#validation">Validation</a></nav></div></section>
+
+<section class="section" id="example"><div class="container"><div class="section-heading"><span class="eyebrow">Worked example</span><h2>A complete configuration file</h2><p>Stored as project-local configuration and honored only after project trust is established.</p></div>
+<pre><code>{
+  "version": 1,
+  "agents": {
+    "maxConcurrency": 2,
+    "timeoutMinutes": 30,
+    "models": {
+      "researcher": "inherit",
+      "planner": "inherit",
+      "developer": "inherit",
+      "testWriter": "inherit",
+      "testRunner": "inherit",
+      "reviewer": "inherit",
+      "committer": "inherit"
+    }
+  },
+  "gates": {
+    "maxConsecutiveFailures": 5,
+    "maxTotalAttempts": 20,
+    "requireCleanFinalTree": true
+  },
+  "research": {
+    "webEnabled": true,
+    "recordSources": true
+  },
+  "memory": {
+    "enabled": true,
+    "updateOnSuccess": true,
+    "reviewRequired": true,
+    "redactSecrets": true
+  },
+  "git": {
+    "worktreeRoot": "adjacent",
+    "retainFailedRuns": true,
+    "autoCommit": true,
+    "allowHistoryRewrite": false
+  }
+}</code></pre></div></section>
+
+<section class="section alt" id="keys"><div class="container"><div class="section-heading"><span class="eyebrow">Reference</span><h2>Every key, type, default, and constraint</h2></div>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Constraints &amp; notes</th></tr></thead><tbody>
+<tr><td><code>version</code></td><td>integer</td><td><code>1</code></td><td>Schema version. Must be <code>1</code>; other major versions are rejected, not migrated silently.</td></tr>
+<tr><td><code>agents.maxConcurrency</code></td><td>integer</td><td><code>2</code></td><td>1–4. Caps simultaneous subagents; the developer and test writer run in parallel at the default.</td></tr>
+<tr><td><code>agents.timeoutMinutes</code></td><td>integer</td><td><code>30</code></td><td>1–120. Child pi process timeout; expiry is treated as an agent failure and retried as infrastructure.</td></tr>
+<tr><td><code>agents.models.&lt;role&gt;</code></td><td>string</td><td><code>"zai/glm-5.3-flash:max"</code></td><td>Per role of <code>researcher</code>, <code>planner</code>, <code>developer</code>, <code>testWriter</code>, <code>testRunner</code>, <code>reviewer</code>, <code>committer</code>. Accepts <code>"inherit"</code> or <code>provider/model[:thinking]</code>. A value present in the file is an <strong>explicit selection</strong> and takes precedence over the package's role-prompt pin; absent keys fall through to the pin, then the default. See <a href="#model-selection">per-subagent model selection</a>.</td></tr>
+<tr><td><code>gates.maxConsecutiveFailures</code></td><td>integer</td><td><code>5</code></td><td>1–10. Consecutive failures on any single gate counter before the planner is engaged.</td></tr>
+<tr><td><code>gates.maxTotalAttempts</code></td><td>integer</td><td><code>20</code></td><td>≥ 10 and ≥ <code>maxConsecutiveFailures</code>. Hard ceiling across all attempts to prevent infinite loops.</td></tr>
+<tr><td><code>gates.requireCleanFinalTree</code></td><td>boolean</td><td><code>true</code></td><td>Refuse the final commit while staging contains unintended files.</td></tr>
+<tr><td><code>research.webEnabled</code></td><td>boolean</td><td><code>true</code></td><td>Enables automatic web research; <code>false</code> restricts the researcher to the repository.</td></tr>
+<tr><td><code>research.recordSources</code></td><td>boolean</td><td><code>true</code></td><td>Records URL, title, retrieval date, excerpt, and confidence for every source. Required for provenance whenever research is used.</td></tr>
+<tr><td><code>memory.enabled</code></td><td>boolean</td><td><code>true</code></td><td>Master switch for evidence capture and wiki promotion.</td></tr>
+<tr><td><code>memory.updateOnSuccess</code></td><td>boolean</td><td><code>true</code></td><td>Propose memory updates only after both gates pass.</td></tr>
+<tr><td><code>memory.reviewRequired</code></td><td>boolean</td><td><code>true</code></td><td>Only reviewer-verified proposals are promoted; unreviewed promotion is not permitted in v1.</td></tr>
+<tr><td><code>memory.redactSecrets</code></td><td>boolean</td><td><code>true</code></td><td>Redact credential-shaped strings before any memory write.</td></tr>
+<tr><td><code>git.worktreeRoot</code></td><td>string</td><td><code>"adjacent"</code></td><td><code>"adjacent"</code> uses <code>&lt;repo-parent&gt;/.gx-dev-worktrees/</code>; alternatively an explicit path outside the repository.</td></tr>
+<tr><td><code>git.retainFailedRuns</code></td><td>boolean</td><td><code>true</code></td><td>Keep failed worktrees and evidence for diagnosis until explicit cleanup.</td></tr>
+<tr><td><code>git.autoCommit</code></td><td>boolean</td><td><code>true</code></td><td>Commit automatically after all gates pass — no final approval needed by design.</td></tr>
+<tr><td><code>git.allowHistoryRewrite</code></td><td>boolean</td><td><code>false</code></td><td>Must remain <code>false</code>. Setting <code>true</code> is <strong>rejected at validation</strong>, not clamped: no <code>reset --hard</code>, force push, or history rewrite in v1.</td></tr>
+</tbody></table></div></div></section>
+
+<section class="section" id="models"><div class="container"><div class="section-heading"><span class="eyebrow">Subagent models</span><h2>Defaults and per-role overrides</h2></div>
+<div class="callout"><strong>Every subagent defaults to <code>zai/glm-5.3-flash:max</code></strong> — GLM-5.3-Flash at maximum thinking. Set <code>agents.models.&lt;role&gt;</code> to any supported provider model id, or to <code>"inherit"</code> to reuse the session's model for that role. A value written into the file is an explicit selection and takes precedence over the package's role-prompt pin — see <a href="#model-selection">per-subagent model selection</a>.</div>
+<div class="grid three" style="margin-top:18px">
+<div class="card"><h3>Per-role</h3><p>Assign stronger or cheaper models where they matter — for example, a deeper model for the planner and reviewer while runners stay fast.</p></div>
+<div class="card"><h3><code>inherit</code></h3><p>Defer to whatever model the user's pi session is running, keeping cost and behavior aligned with the interactive session.</p></div>
+<div class="card"><h3>Thinking level</h3><p>The <code>:max</code> suffix requests maximum thinking. Levels are part of the model string, so each role's reasoning budget is explicit and inspectable.</p></div>
+</div></div></section>
+
+<section class="section alt" id="model-selection"><div class="container"><div class="section-heading"><span class="eyebrow">Per-subagent models</span><h2>Per-subagent model selection</h2><p>Each of the seven roles — researcher, planner, developer, testWriter, testRunner, reviewer, committer — resolves its model independently from your own pi setup. The winning spec is passed to the child pi process at spawn time.</p></div>
+<figure class="diagram">
+<svg viewBox="0 0 980 236" role="img" aria-label="Model resolution precedence per role: an explicit selection in .gx-dev/config.json under agents.models wins first, then a role-prompt frontmatter pin in the package agents markdown, and finally the built-in default zai/glm-5.3-flash:max. The literal inherit stops the chain and spawns the child without a model flag, so it uses the session's default model.">
+  <defs><marker id="cfg-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker></defs>
+  <rect x="30" y="28" width="270" height="118" rx="14" class="dg-accent"/>
+  <text x="165" y="58" text-anchor="middle" class="dg-label">1 · Explicit selection</text>
+  <text x="165" y="82" text-anchor="middle" class="dg-sub">.gx-dev/config.json</text>
+  <text x="165" y="100" text-anchor="middle" class="dg-sub">agents.models.&lt;role&gt;</text>
+  <text x="165" y="126" text-anchor="middle" class="dg-note">written by /gx-dev models · models.mjs</text>
+  <line x1="300" y1="87" x2="340" y2="87" class="dg-line" marker-end="url(#cfg-arrow)"/>
+  <rect x="345" y="28" width="270" height="118" rx="14" class="dg-box"/>
+  <text x="480" y="58" text-anchor="middle" class="dg-label">2 · Role-prompt pin</text>
+  <text x="480" y="82" text-anchor="middle" class="dg-sub">package agents/*.md frontmatter</text>
+  <text x="480" y="100" text-anchor="middle" class="dg-sub">model: provider/model:level</text>
+  <text x="480" y="126" text-anchor="middle" class="dg-note">ships with the installed package</text>
+  <line x1="615" y1="87" x2="655" y2="87" class="dg-line" marker-end="url(#cfg-arrow)"/>
+  <rect x="660" y="28" width="270" height="118" rx="14" class="dg-box"/>
+  <text x="795" y="58" text-anchor="middle" class="dg-label">3 · Built-in default</text>
+  <text x="795" y="82" text-anchor="middle" class="dg-sub">zai/glm-5.3-flash:max</text>
+  <text x="795" y="100" text-anchor="middle" class="dg-sub">GLM-5.3-Flash · max thinking</text>
+  <text x="795" y="126" text-anchor="middle" class="dg-note">fallback for every role</text>
+  <text x="490" y="188" text-anchor="middle" class="dg-accent-text">"inherit" is itself a selection and stops the chain at step 1</text>
+  <text x="490" y="212" text-anchor="middle" class="dg-note">the child spawns without --model and uses the session's default model</text>
+</svg>
+<figcaption>Resolution order per role, evaluated in order; the first match wins.</figcaption>
+</figure>
+<div class="grid two" style="margin-top:18px">
+<article class="card"><h3>First match wins</h3><ol>
+<li><strong>Explicit selection</strong> — any value present in <code>.gx-dev/config.json</code> under <code>agents.models.&lt;role&gt;</code>, including <code>"inherit"</code>. Written by <code>/gx-dev models</code> or <code>scripts/models.mjs set</code>.</li>
+<li><strong>Role-prompt pin</strong> — the <code>model:</code> frontmatter in the package's <code>agents/*.md</code> for that role.</li>
+<li><strong>Built-in default</strong> — <code>zai/glm-5.3-flash:max</code> for every role.</li>
+</ol><p>Omitting a role is not the same as unpinning it: absent keys fall through to the pin, while an explicit <code>"inherit"</code> overrides the pin and delegates to the session.</p></article>
+<article class="card"><h3>The <code>:thinking</code> suffix</h3><p>Specs are <code>provider/model</code> with an optional <code>:thinking</code> suffix — for example <code>ollama-cloud/deepseek-v4-flash:0731:max</code>.</p>
+<ul><li>Levels: <code>off</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code>.</li>
+<li>The level is applied only when the selected model supports reasoning; other models simply run without it.</li>
+<li>The suffix is part of the string, so each role's reasoning budget stays explicit and inspectable in <code>/gx-dev config</code>.</li></ul></article>
+</div>
+<div class="grid two" style="margin-top:18px">
+<article class="card"><h3>Three surfaces, one store</h3><ul>
+<li><code>/gx-dev models</code> — the interactive picker (see the <a href="tui.html#models">TUI reference</a>).</li>
+<li><code>/gx-dev models set &lt;role&gt; &lt;spec&gt;</code> — a direct one-line write; <code>/gx-dev models show</code> prints the resolved chain per role.</li>
+<li><code>node scripts/models.mjs &lt;show|list|set|unset|get&gt;</code> — the same store from a shell or CI script.</li>
+</ul><p>Every surface writes <code>agents.models.&lt;role&gt;</code> atomically; <code>unset</code> removes the key so the pin or default applies again.</p></article>
+<article class="card"><h3>Terminal session</h3><pre><code>$ node scripts/models.mjs show
+researcher   inherit                  explicit (config)
+planner      zai/glm-5.3-flash:max    pin (planner.md)
+reviewer     ollama-cloud/deepseek-v4-flash:0731:max
+             ↑ explicit (config)
+committer    zai/glm-5.3-flash:max    default
+
+$ node scripts/models.mjs set committer zai/glm-5.3-flash:low
+$ node scripts/models.mjs unset researcher
+$ node scripts/models.mjs get reviewer
+$ node scripts/models.mjs list</code></pre></article>
+</div>
+<div class="grid two" style="margin-top:18px">
+<article class="card"><h3>A mixed fleet</h3><p>Only roles listed in the config are explicit. Here the reviewer gets a heavyweight reasoning model, the researcher rides the session's model, and the rest stay on the fast default:</p>
+<pre><code>{
+  "version": 1,
+  "agents": {
+    "models": {
+      "researcher": "inherit",
+      "planner": "zai/glm-5.3-flash:max",
+      "developer": "zai/glm-5.3-flash:max",
+      "testWriter": "zai/glm-5.3-flash:max",
+      "testRunner": "zai/glm-5.3-flash:max",
+      "reviewer": "ollama-cloud/deepseek-v4-flash:0731:max",
+      "committer": "zai/glm-5.3-flash:max"
+    }
+  }
+}</code></pre></article>
+<article class="card"><h3>Reading the fleet</h3><ul>
+<li><code>researcher</code> — explicit <code>"inherit"</code>: spawned without <code>--model</code>, using whatever the interactive session runs.</li>
+<li><code>reviewer</code> — a heavyweight model with the <code>:max</code> suffix; adversarial review is where reasoning depth pays.</li>
+<li>Everyone else — set to the default explicitly, keeping the file self-documenting.</li>
+<li>Drop any key (<code>unset</code>) and that role falls back to the package pin, then the default.</li>
+</ul></article>
+</div>
+<div class="callout warning" style="margin-top:18px"><strong>Validation is structural; availability is advisory.</strong> At load time a selection must be <code>"inherit"</code> or a well-formed <code>provider/model[:thinking]</code> string — anything else is a config error. Availability is different: models come from your own pi setup (<code>pi --list-models</code> and the model registry), so an unmatched selection only <strong>warns</strong> in <code>/gx-dev models show</code> and the picker — it never blocks a run. See <a href="troubleshooting.html#config">troubleshooting</a> for mismatch fixes.</div>
+</div></section>
+
+<section class="section" id="groups"><div class="container"><div class="section-heading"><span class="eyebrow">Semantics</span><h2>Flag groups in depth</h2></div>
+<div class="grid three">
+<article class="card"><h3>Gates limits</h3><ul><li><code>maxConsecutiveFailures</code> applies independently to test, review, and integration counters.</li><li>Infrastructure retries are tracked separately and never consume the budget.</li><li><code>maxTotalAttempts</code> bounds every attempt in the run, including retries.</li><li><code>requireCleanFinalTree</code> keeps the final commit free of unrelated changes.</li></ul></article>
+<article class="card"><h3>Memory flags</h3><ul><li><code>enabled</code> gates both evidence capture and promotion.</li><li><code>updateOnSuccess</code> ties proposals to passing gates.</li><li><code>reviewRequired</code> enforces the reviewer-verified promotion pipeline.</li><li><code>redactSecrets</code> scrubs credential-shaped strings from memory writes.</li></ul></article>
+<article class="card"><h3>Git flags</h3><ul><li><code>worktreeRoot</code> controls isolation location; custom paths must sit outside the repository.</li><li><code>retainFailedRuns</code> preserves diagnosis material at the cost of disk.</li><li><code>autoCommit</code> commits after all gates pass; rollback instructions are always recorded.</li><li><code>allowHistoryRewrite</code> cannot be enabled — see validation below.</li></ul></article>
+</div></div></section>
+
+<section class="section alt" id="validation"><div class="container"><div class="section-heading"><span class="eyebrow">Trust &amp; validation</span><h2>How configuration is validated</h2></div>
+<div class="grid two">
+<article class="card"><h3>Validation rules</h3><ul><li>Unknown keys are rejected — typos never silently no-op.</li><li>Types are exact: booleans are not coerced from strings.</li><li>Numeric ranges are enforced as listed above.</li><li><code>git.allowHistoryRewrite: true</code> is a hard error, by design.</li><li>Run <code>/gx-dev config</code> or <code>/gx-dev doctor</code> to see full validation output.</li></ul></article>
+<article class="card"><h3>Trust ordering</h3><ul><li>Project-local configuration is honored only after project trust is established.</li><li>Untrusted projects run on package defaults only.</li><li>Project-local agent definitions face the same trust gate, so repository content cannot redefine gates.</li></ul><span class="tag danger">Trust before config</span></article>
+</div></div></section>
+</main>
+<footer class="site-footer"><div class="container footer-inner"><span>gx-dev planning documentation · <span data-year></span></span><div class="footer-links"><a href="security.html">Next: Security</a><a href="delivery.html">Roadmap</a><a href="../PLAN.md">Full plan</a></div></div></footer><script src="assets/search-index.js"></script><script src="assets/site.js"></script><script src="assets/search.js"></script></body></html>
