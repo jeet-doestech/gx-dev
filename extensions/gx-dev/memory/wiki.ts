@@ -55,12 +55,21 @@ export function isGeneratedPage(name: string): boolean {
   return name === "index" || name === "log";
 }
 
-/** A page name is safe when it is a clean relative path without traversal. */
+/**
+ * A page name is safe when it is a clean relative path without traversal:
+ * non-empty, no backslashes (Windows separators), no `..` anywhere, no
+ * absolute (`/…`) or Windows drive (`C:…`) prefixes, no control characters,
+ * and no empty or dot-only path segments. Applied on every reserve/promote;
+ * a violating name must never reach the filesystem.
+ */
 export function isValidPageName(name: string): boolean {
-  if (name.length === 0) return false;
+  if (name.length === 0 || name.length > 200) return false;
+  if (name.trim() !== name) return false;
+  if (/[\u0000-\u001f\u007f]/.test(name)) return false;
   if (name.includes("\\") || name.includes("..")) return false;
+  if (/^[A-Za-z]:/.test(name)) return false;
   if (name.startsWith("/") || name.endsWith("/")) return false;
-  return !name.split("/").some((part) => part === "" || part === "." || part === "..");
+  return !name.split("/").some((part) => part === "" || part === "." || part === ".." || part.trim() !== part);
 }
 
 /** Maps a page name to its file name (`decisions/x` -> `decisions/x.md`). */

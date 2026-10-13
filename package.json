@@ -8,13 +8,14 @@
     "extensions": ["./extensions/gx-dev/index.ts"]
   },
   "license": "MIT",
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=24" },
   "files": [
     "extensions",
     "agents",
     "scripts",
     "PLAN.md",
     "README.md",
+    "IMPLEMENTATION.md",
     "LICENSE"
   ],
   "exports": {
@@ -24,13 +25,16 @@
     "test": "node --test 'tests/unit/*.test.ts' 'tests/integration/*.test.ts' 'tests/e2e/*.test.ts'",
     "test:unit": "node --test 'tests/unit/*.test.ts'",
     "typecheck": "tsc --noEmit",
-    "sample": "node scripts/sample-workflow.mjs"
+    "sample": "node scripts/sample-workflow.mjs",
+    "test:package": "node scripts/package-smoke.mjs",
+    "check": "npm run typecheck && npm test && npm run sample && npm run test:package"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.80.0"
+    "@earendil-works/pi-coding-agent": ">=1.2.0 <2",
+    "@earendil-works/pi-tui": "*"
   }
 }

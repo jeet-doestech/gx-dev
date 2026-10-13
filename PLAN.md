@@ -1,5 +1,7 @@
 # gx-dev Development Plan
 
+> Original design document, retained for context—not a shipped-feature checklist. See [README.md](README.md) for supported behavior and [IMPLEMENTATION.md](IMPLEMENTATION.md) for current completion status. The standalone HTML documentation site was intentionally superseded by Markdown documentation.
+
 ## 1. Product definition
 
 **gx-dev** will be an installable TypeScript pi package that coordinates isolated AI subagents through a deterministic, evidence-based feature-development workflow.

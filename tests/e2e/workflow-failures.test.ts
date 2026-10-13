@@ -44,7 +44,7 @@ test("test gate failure routes back to DEVELOP, developer is re-invoked, then th
       return undefined; // second invocation takes the happy path
     };
 
-    bits = makeEngineBits(repoPath, { script });
+    bits = makeEngineBits(repoPath, { script, autoApprove: true });
 
     const state = asRunState(await bits.engine.start(REQUEST));
     assert.equal(state.state, "COMPLETE", `expected COMPLETE after rework, got: ${state.state}`);
@@ -89,7 +89,7 @@ test("five consecutive test failures escalate to REPLAN: planner is re-invoked w
       return undefined;
     };
 
-    bits = makeEngineBits(repoPath, { script });
+    bits = makeEngineBits(repoPath, { script, autoApprove: true });
 
     const state = asRunState(await bits.engine.start(REQUEST));
     assert.equal(state.state, "COMPLETE", `expected COMPLETE after replan, got: ${state.state}`);

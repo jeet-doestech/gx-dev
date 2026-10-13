@@ -17,16 +17,16 @@
 
 import { execFileSync } from "node:child_process";
 import {
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { dirname, join } from "node:path";
 import { Engine } from "../../extensions/gx-dev/orchestration/engine.ts";
 import type { EngineDeps, EngineUI } from "../../extensions/gx-dev/orchestration/engine.ts";
 import type { GxConfig } from "../../extensions/gx-dev/config.ts";
@@ -49,6 +49,7 @@ import type {
 } from "../../extensions/gx-dev/domain/interfaces.ts";
 import { FsRunStore } from "../../extensions/gx-dev/domain/persist.ts";
 import type { RunState } from "../../extensions/gx-dev/domain/state.ts";
+import { GitWorktreeManager } from "../../extensions/gx-dev/git/worktrees.ts";
 import type { CommandExecutor } from "../../extensions/gx-dev/gates/test-gate.ts";
 import { extractJson, validateCompletion } from "../../extensions/gx-dev/domain/schemas.ts";
 import type { AgentCompletion, AgentRole } from "../../extensions/gx-dev/domain/schemas.ts";
@@ -67,6 +68,10 @@ export interface FakeAgentStep {
   fail?: boolean;
   /** Infrastructure failure (spawn/timeout class). */
   infra?: boolean;
+  /** Suppress the default real file writes into work.cwd (default false). */
+  skipWrite?: boolean;
+  /** Extra files written relative to the agent's real cwd (after defaults). */
+  writeFiles?: { path: string; content: string }[];
 }
 
 /**
@@ -96,6 +101,10 @@ export interface AgentInvocation {
  */
 export class FakeAgentRunner implements AgentRunner {
   readonly invocations: AgentInvocation[] = [];
+  /** Roles in the order their runs STARTED (concurrency observation). */
+  readonly startOrder: AgentRole[] = [];
+  /** Roles in the order their runs FINISHED (concurrency observation). */
+  readonly endOrder: AgentRole[] = [];
   private readonly callsByRole = new Map<AgentRole, number>();
   private readonly script: FakeScript;
 
@@ -111,12 +120,13 @@ export class FakeAgentRunner implements AgentRunner {
   async run(
     role: AgentRole,
     task: string,
-    _work: AgentWorkContext,
+    work: AgentWorkContext,
     _options?: AgentRunOptions,
   ): Promise<AgentRunResult> {
     const call = this.count(role) + 1;
     this.callsByRole.set(role, call);
     this.invocations.push({ role, task, call });
+    this.startOrder.push(role);
     const startedAt = Date.now();
 
     let step: FakeAgentStep;
@@ -126,6 +136,28 @@ export class FakeAgentRunner implements AgentRunner {
       step = { fail: true, rawText: `script threw: ${(e as Error).message}` };
     }
     const durationMs = Math.max(1, Date.now() - startedAt);
+
+    // Real work in a real cwd (REVIEW §5: fake completions are not enough):
+    // the developer and test writer write the promised files into their
+    // worktree so the git layer has actual content to checkpoint, diff,
+    // integrate, and verify with the real verification contract.
+    if (step.skipWrite !== true && (role === "developer" || role === "testWriter")) {
+      try {
+        writeFakeDeliverables(role, work);
+      } catch {
+        // a read-only or missing cwd fails best-effort; gates then see it
+      }
+    }
+    for (const file of step.writeFiles ?? []) {
+      try {
+        const target = join(work.cwd, file.path);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, file.content, "utf8");
+      } catch {
+        // read-only cwd: nothing to write
+      }
+    }
+    this.endOrder.push(role);
 
     if (step.infra) {
       const result: AgentRunResult = {
@@ -195,7 +227,8 @@ export class FakeAgentRunner implements AgentRunner {
 
 /**
  * Default happy-path completion for a role (fresh object every call), shaped
- * exactly as the task spec requires: researcher with 1 source; planner with
+ * exactly as the task spec requires: researcher with 1 source and concrete
+ * acceptanceCriteria for the fixture's farewell/shout behavior; planner with
  * one task per assignee and verificationContract ['node --test']; developer
  * with changedFiles; testWriter with an inventory entry; testRunner with
  * commands [{command:'node --test',exitCode:0}] and empty ownership; reviewer
@@ -226,6 +259,10 @@ export function defaultCompletion(role: AgentRole): AgentCompletion {
         ],
         findings: ["src/greet.js exports greet(name); the module is plain ESM."],
         requirementAmbiguities: [],
+        acceptanceCriteria: [
+          'farewell("world") returns "Goodbye, world!"',
+          'shout("world") returns "HELLO, WORLD!"',
+        ],
       };
     case "planner":
       return {
@@ -284,26 +321,83 @@ export function defaultCompletion(role: AgentRole): AgentCompletion {
   }
 }
 
+/**
+ * Writes the promised deliverables into the agent's real worktree cwd so the
+ * git layer has actual content to checkpoint, diff, integrate, and verify.
+ * The developer extends src/greet.js (keeping the public contract); the test
+ * writer adds an independent behavior test file. Content is deterministic
+ * and produces a ≥10-line implementation diff (test-gate preflight bar).
+ */
+function writeFakeDeliverables(role: "developer" | "testWriter", work: AgentWorkContext): void {
+  if (typeof work.cwd !== "string" || work.cwd === "") return;
+  if (role === "developer") {
+    const src = join(work.cwd, "src");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(
+      join(src, "greet.js"),
+      [
+        "export function greet(name) {",
+        "  return `Hello, ${name}!`;",
+        "}",
+        "",
+        "export function farewell(name) {",
+        "  return `Goodbye, ${name}!`;",
+        "}",
+        "",
+        "export function shout(name) {",
+        "  const loud = typeof name === \"string\" ? name.toUpperCase() : name;",
+        "  return `HELLO, ${loud}!`;",
+        "}",
+        "",
+        "export function whisper(name) {",
+        "  return `psst... hey ${name}`;",
+        "}",
+        "",
+        "export function greetAll(...names) {",
+        "  return names.map((n) => greet(n)).join(\", \");",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+  }
+  if (role === "testWriter") {
+    const testDir = join(work.cwd, "test");
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(
+      join(testDir, "farewell.test.js"),
+      [
+        'import test from "node:test";',
+        'import assert from "node:assert/strict";',
+        'import { farewell, shout } from "../src/greet.js";',
+        "",
+        'test("farewell says goodbye", () => {',
+        '  assert.equal(farewell("world"), "Goodbye, world!");',
+        "});",
+        "",
+        'test("shout raises the volume", () => {',
+        '  assert.equal(shout("world"), "HELLO, WORLD!");',
+        "});",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
-// FakeGitCoordinator
+// FakeGitCoordinator (real Git underneath)
 // ---------------------------------------------------------------------------
 
 export interface FakeGitOptions {
-  baseBranch?: string;
-  baseCommit?: string;
-  /** integrate() outcome; default true. */
+  /** integrate() outcome; default true. When false, integrate() short-circuits with the configured conflict (no real merge). */
   integrateSuccess?: boolean;
   /** Reported conflicts when integrateSuccess is false. */
   conflictedFiles?: string[];
+  /** When set, commitStaged reports this hash instead of applying a real commit. */
   commitHash?: string;
+  /** Rollback command reported with commitHash override. */
   rollbackCommand?: string;
-  /**
-   * Seed each worktree dir with the repo's working files and a fresh git
-   * repo + initial commit (default true). The real engine runs `git diff`,
-   * `git status --porcelain`, and the verification contract inside these
-   * dirs, so they must be working git repositories.
-   */
-  populateWorktrees?: boolean;
 }
 
 export interface FakeGitCall {
@@ -312,41 +406,33 @@ export interface FakeGitCall {
   detail: Record<string, unknown>;
 }
 
-const GIT_ENV: Record<string, string> = {
-  GIT_AUTHOR_NAME: "gx-dev-harness",
-  GIT_AUTHOR_EMAIL: "harness@gx-dev.invalid",
-  GIT_COMMITTER_NAME: "gx-dev-harness",
-  GIT_COMMITTER_EMAIL: "harness@gx-dev.invalid",
-};
-
 /**
- * In-memory GitCoordinator. prepareWorktrees creates real temp directories
- * (mkdtemp) on disk, seeded as standalone git repos so the engine's
- * allowlisted commands (`git diff HEAD`, `node --test`,
- * `git status --porcelain`) behave deterministically inside them.
+ * Recording GitCoordinator that DELEGATES to the real GitWorktreeManager
+ * (REVIEW §5: the old standalone-repo fake let state-machine tests pass
+ * without establishing delivery). prepareWorktrees/integrate/checkpoint/
+ * commit are real git operations over the fixture repository, so actual
+ * diffs, tree ids, gates, and the final commit are exercised end to end.
  */
 export class FakeGitCoordinator implements GitCoordinator {
   readonly calls: FakeGitCall[] = [];
-  private readonly createdDirs: string[] = [];
+  private readonly repos = new Set<string>();
+  private readonly runsPrepared = new Set<string>();
+  private readonly real = new GitWorktreeManager();
   private readonly opts: {
-    baseBranch: string;
-    baseCommit: string;
     integrateSuccess: boolean;
     conflictedFiles: string[];
-    commitHash: string;
-    rollbackCommand: string;
-    populateWorktrees: boolean;
+    commitHash?: string;
+    rollbackCommand?: string;
   };
 
   constructor(opts: FakeGitOptions = {}) {
     this.opts = {
-      baseBranch: opts.baseBranch ?? "main",
-      baseCommit: opts.baseCommit ?? "b4se000000000000000000000000000000000000",
       integrateSuccess: opts.integrateSuccess ?? true,
       conflictedFiles: opts.conflictedFiles ?? ["src/greet.js"],
-      commitHash: opts.commitHash ?? "f00df00df00df00df00df00df00df00df00df00d",
-      rollbackCommand: opts.rollbackCommand ?? "git reset --hard HEAD~1",
-      populateWorktrees: opts.populateWorktrees ?? true,
+      ...(opts.commitHash !== undefined ? { commitHash: opts.commitHash } : {}),
+      ...(opts.rollbackCommand !== undefined
+        ? { rollbackCommand: opts.rollbackCommand }
+        : {}),
     };
   }
 
@@ -361,50 +447,29 @@ export class FakeGitCoordinator implements GitCoordinator {
   async recordBase(
     repoPath: string,
   ): Promise<{ branch: string | null; commit: string | null; dirty: boolean; refused?: string }> {
+    this.repos.add(repoPath);
     this.record("recordBase", { repoPath });
-    return { branch: this.opts.baseBranch, commit: this.opts.baseCommit, dirty: false };
+    return this.real.recordBase(repoPath);
   }
 
-  async prepareWorktrees(repoPath: string, runId: string): Promise<WorktreeHandles> {
-    this.record("prepareWorktrees", { repoPath, runId });
-    const mk = (role: string): string => {
-      const dir = mkdtempSync(join(tmpdir(), `gx-dev-${runId}-${role}-`));
-      if (this.opts.populateWorktrees) this.populateWorktree(dir, repoPath);
-      this.createdDirs.push(dir);
-      return dir;
-    };
-    const developer = mk("developer");
-    const tests = mk("tests");
-    const staging = mk("staging");
-    return {
-      runId,
-      developer,
-      tests,
-      staging,
-      branches: {
-        developer: `gx-dev/${runId}/developer`,
-        tests: `gx-dev/${runId}/tests`,
-        staging: `gx-dev/${runId}/staging`,
-      },
-    };
+  async prepareWorktrees(repoPath: string, runId: string, base?: string): Promise<WorktreeHandles> {
+    this.repos.add(repoPath);
+    this.runsPrepared.add(runId);
+    this.record("prepareWorktrees", { repoPath, runId, ...(base !== undefined ? { base } : {}) });
+    return this.real.prepareWorktrees(repoPath, runId, base);
   }
 
   async integrate(handles: WorktreeHandles): Promise<IntegratedResult> {
     this.record("integrate", { runId: handles.runId });
-    if (this.opts.integrateSuccess) {
+    if (!this.opts.integrateSuccess) {
       return {
         stagingWorktree: handles.staging ?? "",
-        success: true,
-        conflictedFiles: [],
+        success: false,
+        conflictedFiles: [...this.opts.conflictedFiles],
         autoResolved: [],
       };
     }
-    return {
-      stagingWorktree: handles.staging ?? "",
-      success: false,
-      conflictedFiles: [...this.opts.conflictedFiles],
-      autoResolved: [],
-    };
+    return this.real.integrate(handles);
   }
 
   async checkpointStaging(
@@ -412,7 +477,7 @@ export class FakeGitCoordinator implements GitCoordinator {
     message: string,
   ): Promise<string | null> {
     this.record("checkpointStaging", { runId: handles.runId, message });
-    return null;
+    return this.real.checkpointStaging(handles, message);
   }
 
   async commitStaged(
@@ -421,52 +486,61 @@ export class FakeGitCoordinator implements GitCoordinator {
     baseBranch: string,
   ): Promise<{ commitHash: string; strategy: string; rollbackCommand: string }> {
     this.record("commitStaged", { runId: handles.runId, message, baseBranch });
-    return {
-      commitHash: this.opts.commitHash,
-      strategy: "merge-commit",
-      rollbackCommand: this.opts.rollbackCommand,
-    };
+    if (this.opts.commitHash !== undefined) {
+      return {
+        commitHash: this.opts.commitHash,
+        strategy: "merge-commit",
+        rollbackCommand: this.opts.rollbackCommand ?? "git revert HEAD",
+      };
+    }
+    return this.real.commitStaged(handles, message, baseBranch);
   }
 
   async cleanup(handles: WorktreeHandles, opts?: { force?: boolean }): Promise<void> {
     this.record("cleanup", { runId: handles.runId, force: opts?.force === true });
-    this.removeTempDirs();
-  }
-
-  /** Test teardown: force-remove every temp dir this fake created. */
-  removeTempDirs(): void {
-    for (const dir of this.createdDirs) {
-      if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
-    }
-    this.createdDirs.length = 0;
+    await this.real.cleanup(handles, opts);
   }
 
   /**
-   * Copies the repo's working files (excluding .git) into the worktree dir
-   * and initializes it as its own git repository with an initial commit, so
-   * it is a clean tree: `git status --porcelain` is empty and `node --test`
-   * runs the fixture's real tests.
+   * Test teardown: force-remove this harness's prepared run worktrees.
+   * Only the run-specific directories are removed — the worktree ROOT is
+   * shared by every fixture under the same parent tmpdir, and other test
+   * files may run concurrently with live worktrees there.
    */
-  private populateWorktree(dir: string, repoPath: string): void {
-    try {
-      if (!existsSync(repoPath)) return;
-      cpSync(repoPath, dir, {
-        recursive: true,
-        filter: (src) => basename(src) !== ".git",
-      });
-      const git = (args: string[]): void => {
-        execFileSync("git", args, {
-          cwd: dir,
-          env: { ...process.env, ...GIT_ENV },
-          stdio: "ignore",
-        });
-      };
-      git(["init", "-q", "-b", "main"]);
-      git(["add", "-A"]);
-      git(["commit", "-q", "-m", "worktree base (fake harness)"]);
-    } catch {
-      // best-effort seeding; gates then see a plain empty dir
+  removeTempDirs(): void {
+    for (const repoPath of this.repos) {
+      try {
+        const root = join(dirname(repoPath), ".gx-dev-worktrees");
+        for (const runId of this.runsPrepared) {
+          const dir = join(root, runId);
+          if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+        }
+        const git = (args: string[]): void => {
+          execFileSync("git", args, { cwd: repoPath, stdio: "ignore" });
+        };
+        git(["worktree", "prune", "--force"]);
+        for (const runId of this.runsPrepared) {
+          const branches = execFileSync("git", ["branch", "--list", `gx-dev/${runId}/*`], {
+            cwd: repoPath,
+            encoding: "utf8",
+          });
+          for (const line of branches.split("\n")) {
+            const name = line.replace("*", "").trim();
+            if (name !== "") {
+              try {
+                git(["branch", "-D", name]);
+              } catch {
+                // already gone
+              }
+            }
+          }
+        }
+      } catch {
+        // best-effort teardown
+      }
     }
+    this.repos.clear();
+    this.runsPrepared.clear();
   }
 }
 
@@ -474,10 +548,13 @@ export class FakeGitCoordinator implements GitCoordinator {
 // FakeMemoryCoordinator
 // ---------------------------------------------------------------------------
 
-/** Records reserve/promote traffic; search and lint are trivially healthy. */
+/** Records reserve/promote/search traffic; lint is trivially healthy. */
 export class FakeMemoryCoordinator implements MemoryCoordinator {
   readonly reserved: MemoryProposal[][] = [];
   readonly promoted: MemoryProposal[][] = [];
+  readonly searched: string[] = [];
+  readonly lintChecked: MemoryProposal[][] = [];
+  readonly released: string[] = [];
 
   async reserve(proposals: MemoryProposal[]): Promise<MemoryProposal[]> {
     this.reserved.push(proposals);
@@ -491,12 +568,22 @@ export class FakeMemoryCoordinator implements MemoryCoordinator {
     return { applied: proposals.map((p) => p.page), conflicts: [] };
   }
 
-  async search(_query: string, _limit?: number): Promise<never[]> {
+  async search(query: string, _limit?: number): Promise<never[]> {
+    this.searched.push(query);
     return [];
   }
 
   async lint(): Promise<{ ok: boolean; issues: string[] }> {
     return { ok: true, issues: [] };
+  }
+
+  lintProposals(proposals: MemoryProposal[]): { ok: boolean; issues: string[] } {
+    this.lintChecked.push(proposals);
+    return { ok: true, issues: [] };
+  }
+
+  async release(runId: string): Promise<void> {
+    this.released.push(runId);
   }
 }
 
@@ -651,6 +738,11 @@ class BindingStores {
 export interface EngineUIOptions {
   /** Default: no UI — the engine parks material questions in WAITING_FOR_USER. */
   ui?: EngineUI;
+  /**
+   * Auto-approval UI for positive cases (REVIEW: mandatory approvals mean a
+   * no-UI run parks at every checkpoint). Answers "approve" to everything.
+   */
+  autoApprove?: boolean;
 }
 
 export interface EngineBitsOptions extends EngineUIOptions {
@@ -661,6 +753,14 @@ export interface EngineBitsOptions extends EngineUIOptions {
   /** 'jsonl' (default) writes events.jsonl so tests can audit the file. */
   events?: "jsonl" | "memory";
   config?: GxConfig;
+}
+
+/** UI that explicitly approves every question/decision (positive cases). */
+export function autoApprovalUI(): EngineUI {
+  return {
+    askUser: async (_question) => "approve",
+    notify: () => {},
+  };
 }
 
 export interface EngineBits {
@@ -681,6 +781,7 @@ export function makeEngineBits(repoPath: string, opts: EngineBitsOptions = {}): 
   const memory = new FakeMemoryCoordinator();
   const executor = new FakeCommandExecutor();
   const stores = new BindingStores(repoPath, opts.attachRunId, opts.events ?? "jsonl");
+  const ui = opts.ui ?? (opts.autoApprove === true ? autoApprovalUI() : undefined);
 
   const deps: EngineDeps = {
     runner: agents,
@@ -690,7 +791,7 @@ export function makeEngineBits(repoPath: string, opts: EngineBitsOptions = {}): 
     artifacts: stores.artifacts,
     events: stores.events,
     config: opts.config ?? defaultConfig(),
-    ...(opts.ui !== undefined ? { ui: opts.ui } : {}),
+    ...(ui !== undefined ? { ui } : {}),
   };
 
   return {

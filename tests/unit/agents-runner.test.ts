@@ -7,7 +7,7 @@
  */
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -81,9 +81,33 @@ const researcherCompletionJson = JSON.stringify({
   ],
   findings: ["repo uses node"],
   requirementAmbiguities: [],
+  acceptanceCriteria: ["node --test passes on the repository after the change"],
 });
 
 const assistantText = "Final report.\n\n```json\n" + researcherCompletionJson + "\n```";
+
+const reviewerCompletionJson = JSON.stringify({
+  status: "complete",
+  summary: "Reviewed the staged diff adversarially.",
+  artifacts: ["review-findings.md"],
+  questions: [],
+  assumptions: [],
+  risks: [],
+  recommendedNextState: "DOCUMENTATION_UPDATE",
+  findings: [],
+  documentationUpdates: ["README.md"],
+});
+
+const reviewerValidEvents = [
+  JSON.stringify({ type: "session", version: 3, id: "fake", timestamp: "2025-01-01T00:00:00Z", cwd: "/tmp" }),
+  JSON.stringify({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "```json\n" + reviewerCompletionJson + "\n```" }],
+    },
+  }),
+].join("\n");
 
 const validEvents = [
   JSON.stringify({ type: "session", version: 3, id: "fake", timestamp: "2025-01-01T00:00:00Z", cwd: "/tmp" }),
@@ -217,8 +241,24 @@ function harness(scriptPath: string, recordArgv: boolean): { work: AgentWorkCont
 }
 
 function readLines(file: string | null): string[] {
-  if (!file) return [];
+  if (!file || !existsSync(file)) return [];
   return readFileSync(file, "utf8").split("\n").filter((l) => l.length > 0);
+}
+
+/** Polls until the given pid is gone (fail-safe kill(0) probe). */
+async function assertProcessDead(pid: number, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return; // ESRCH — gone
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`process ${pid} is still alive after termination`);
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
 }
 
 // ------------------------------------------------------------------ tests
@@ -424,5 +464,338 @@ describe("PiAgentRunner", () => {
 
     await runner.run("researcher", "Task.", work);
     assert.equal(readLines(stores.callsFile).length, 1, "infrastructure failures must not be retried");
+  });
+});
+
+/**
+ * Runtime-safety tests (REVIEW P1: process shutdown/concurrency): process
+ * group termination waits for close, aborted runs are never retried, the
+ * schema retry includes the rejected output, and the runner honors role
+ * tools metadata with the writableRoots write-guard and inheritedModel.
+ */
+describe("PiAgentRunner runtime safety", () => {
+  it("fails immediately without spawning when the signal is already aborted", async () => {
+    const script = fakeValid(tempDir("gxdev-bin-"));
+    const { work, stores } = harness(script, false);
+    const runner = new PiAgentRunner({ config: makeConfig(script), agentsDir: REAL_AGENTS_DIR });
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runner.run("researcher", "Pre-aborted.", work, {
+      signal: controller.signal,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.infrastructure, true);
+    assert.match(result.error ?? "", /aborted by caller/);
+    assert.equal(readLines(stores.callsFile).length, 0, "no child may be spawned after abort");
+  });
+
+  it("does not retry when an abort lands during the first attempt, even on a clean exit", async () => {
+    // Ignores SIGTERM via trap, emits INVALID output, then exits 0 — the
+    // clean exit plus invalid schema would look retryable, but the abort
+    // must win and no second child may be spawned.
+    const script = writeScript(
+      tempDir("gxdev-bin-"),
+      "pi-trap-abort",
+      String.raw`#!/bin/sh
+trap 'exit 0' TERM
+if [ -n "$GX_CALLS_FILE" ]; then
+  printf 'x\n' >> "$GX_CALLS_FILE"
+fi
+` + heredoc(invalidEvents) + `
+sleep 30
+`,
+    );
+    const { work, stores } = harness(script, false);
+    const runner = new PiAgentRunner({ config: makeConfig(script), agentsDir: REAL_AGENTS_DIR });
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 150).unref();
+
+    const result = await runner.run("researcher", "Abort mid-attempt.", work, {
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+
+    assert.equal(readLines(stores.callsFile).length, 1, "aborted runs must not be retried");
+    assert.equal(result.ok, false);
+    assert.equal(result.infrastructure, true);
+    assert.match(result.error ?? "", /aborted by caller/);
+  });
+
+  it("waits for the child's close event on timeout before resolving", async () => {
+    // On SIGTERM the child cleans up for ~400ms, writes a marker, then exits.
+    // The outcome may only resolve after that close (no post-cancel writes).
+    const dir = tempDir("gxdev-run-");
+    const marker = join(dir, "closed.marker");
+    const script = writeScript(
+      dir,
+      "pi-late-close",
+      String.raw`#!/bin/sh
+trap 'sleep 0.4; : > "$GX_MARKER_FILE"; exit 0' TERM
+sleep 30
+`,
+    );
+    const { work, stores } = harness(script, false);
+    work.env = { ...work.env, GX_MARKER_FILE: marker };
+    const runner = new PiAgentRunner({ config: makeConfig(script), agentsDir: REAL_AGENTS_DIR });
+
+    const result = await runner.run("researcher", "Hanging with cleanup.", work, { timeoutMs: 300 });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.infrastructure, true);
+    assert.match(result.error ?? "", /timed out after 300ms/);
+    assert.ok(existsSync(marker), "close handler must have run before the outcome resolved");
+    assert.ok(result.durationMs >= 350, `must wait for graceful close, took ${result.durationMs}ms`);
+  });
+
+  it("terminates the whole process group on timeout and waits for descendants", async () => {
+    // The fake pi spawns a grandchild (same process group, holding the
+    // inherited stdout pipe). The run may only resolve once the group —
+    // including the grandchild — is gone.
+    const dir = tempDir("gxdev-run-");
+    const pidFile = join(dir, "grandchild.pid");
+    const script = writeScript(
+      dir,
+      "pi-spawn-grandchild",
+      String.raw`#!/bin/sh
+sleep 30 &
+echo $! > "$GX_CHILD_PID_FILE"
+sleep 30
+`,
+    );
+    const { work, stores } = harness(script, false);
+    work.env = { ...work.env, GX_CHILD_PID_FILE: pidFile };
+    const runner = new PiAgentRunner({ config: makeConfig(script), agentsDir: REAL_AGENTS_DIR });
+
+    const result = await runner.run("researcher", "Tree kill.", work, { timeoutMs: 300 });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.infrastructure, true);
+    assert.match(result.error ?? "", /timed out after 300ms/);
+    const grandchild = Number(readFileSync(pidFile, "utf8").trim());
+    assert.ok(Number.isInteger(grandchild) && grandchild > 0);
+    await assertProcessDead(grandchild);
+  });
+
+  it("includes the rejected output in the schema-feedback retry", async () => {
+    // Second attempt gets valid output ONLY when the feedback carries both
+    // the header and the actual invalid text from the first attempt.
+    const script = writeScript(
+      tempDir("gxdev-bin-"),
+      "pi-feedback",
+      String.raw`#!/bin/sh
+for last in "$@"; do :; done
+if [ -n "$GX_CALLS_FILE" ]; then
+  printf 'x\n' >> "$GX_CALLS_FILE"
+fi
+case "$last" in
+  *"Your previous output was:"*)
+    case "$last" in
+      *"I cannot produce JSON right now."*)
+` + heredoc(validEvents) + `
+        ;;
+      *)
+` + heredoc(invalidEvents) + `
+        ;;
+    esac
+    ;;
+  *)
+` + heredoc(invalidEvents) + `
+    ;;
+esac
+`,
+    );
+    const { work, stores } = harness(script, false);
+    const runner = new PiAgentRunner({ config: makeConfig(script), agentsDir: REAL_AGENTS_DIR });
+
+    const result = await runner.run("researcher", "Repair your output.", work);
+
+    assert.equal(readLines(stores.callsFile).length, 2);
+    assert.equal(result.ok, true, `feedback must contain the invalid text: ${result.error ?? ""}`);
+    assert.ok(result.completion);
+  });
+
+  it("resolves whenIdle() once no spawns are in flight", async () => {
+    const script = fakeValid(tempDir("gxdev-bin-"));
+    const { work } = harness(script, false);
+    const runner = new PiAgentRunner({ config: makeConfig(script), agentsDir: REAL_AGENTS_DIR });
+    await runner.run("researcher", "Idle check.", work);
+    await runner.whenIdle(); // must resolve immediately after the run
+  });
+});
+
+describe("PiAgentRunner tools metadata", () => {
+  /** Writes a researcher.md with the given tools frontmatter value. */
+  function agentsDirWithTools(tools: string | null): string {
+    const agentsDir = tempDir("gxdev-agents-");
+    const front = tools === null
+      ? "---\nname: researcher\ndescription: d\n---"
+      : `---\nname: researcher\ndescription: d\ntools: ${tools}\n---`;
+    writeFileSync(join(agentsDir, "researcher.md"), `${front}\nBody prompt for the researcher.\n`);
+    return agentsDir;
+  }
+
+  it("strips edit/write from declared tools when writableRoots is empty", async () => {
+    const script = fakeValid(tempDir("gxdev-bin-"));
+    const { work, stores } = harness(script, true);
+    const runner = new PiAgentRunner({
+      config: makeConfig(script),
+      agentsDir: agentsDirWithTools("read, bash, edit, write"),
+    });
+    const result = await runner.run("researcher", "Read-only probe.", { ...work, writableRoots: [] });
+    assert.equal(result.ok, true);
+    const argv = readLines(stores.argvFile);
+    const t = argv.indexOf("--tools");
+    assert.notEqual(t, -1);
+    assert.equal(argv[t + 1], "read,bash");
+  });
+
+  it("keeps edit/write from declared tools when writableRoots is nonempty", async () => {
+    const script = fakeValid(tempDir("gxdev-bin-"));
+    const { work, stores } = harness(script, true);
+    const runner = new PiAgentRunner({
+      config: makeConfig(script),
+      agentsDir: agentsDirWithTools("read, bash, edit, write"),
+    });
+    const result = await runner.run("researcher", "Writable probe.", { ...work, writableRoots: [work.cwd] });
+    assert.equal(result.ok, true);
+    const argv = readLines(stores.argvFile);
+    const t = argv.indexOf("--tools");
+    assert.equal(argv[t + 1], "read,bash,edit,write");
+  });
+
+  it("grants edit/write to the documentation reviewer only when writableRoots is nonempty", async () => {
+    // Reviewer metadata declares read,bash only; documentation mode runs with
+    // writableRoots, so the runner must still hand the role edit/write (the
+    // engine enforces the docs-only diff; without roots it must not).
+    const script = writeScript(
+      tempDir("gxdev-bin-"),
+      "pi-reviewer-valid",
+      String.raw`#!/bin/sh
+if [ -n "$GX_ARGV_FILE" ]; then
+  for a in "$@"; do
+    printf '%s\n' "$a" >> "$GX_ARGV_FILE"
+  done
+fi
+` + heredoc(reviewerValidEvents),
+    );
+    const { work, stores } = harness(script, true);
+    const agentsDir = tempDir("gxdev-agents-");
+    writeFileSync(
+      join(agentsDir, "reviewer.md"),
+      "---\nname: reviewer\ndescription: d\ntools: read, bash\n---\nReviewer body.\n",
+    );
+    const runner = new PiAgentRunner({ config: makeConfig(script), agentsDir });
+
+    const docsRun = await runner.run("reviewer", "Docs probe.", { ...work, writableRoots: [join(work.cwd, "docs")] });
+    assert.equal(docsRun.ok, true);
+    const docsArgv = readLines(stores.argvFile);
+    assert.equal(docsArgv[docsArgv.indexOf("--tools") + 1], "read,bash,edit,write");
+
+    const roRun = await runner.run("reviewer", "Review probe.", { ...work, writableRoots: [] });
+    assert.equal(roRun.ok, true);
+    // argv file accumulates both invocations; only the second run's tail.
+    const allArgv = readLines(stores.argvFile);
+    const roArgv = allArgv.slice(docsArgv.length);
+    assert.equal(roArgv[roArgv.indexOf("--tools") + 1], "read,bash");
+  });
+
+  it("starts --no-tools when only write tools are declared and no roots are writable", async () => {
+    const script = fakeValid(tempDir("gxdev-bin-"));
+    const { work, stores } = harness(script, true);
+    const runner = new PiAgentRunner({
+      config: makeConfig(script),
+      agentsDir: agentsDirWithTools("write"),
+    });
+    await runner.run("researcher", "No tools probe.", { ...work, writableRoots: [] });
+    const argv = readLines(stores.argvFile);
+    assert.notEqual(argv.indexOf("--no-tools"), -1);
+    assert.equal(argv.indexOf("--tools"), -1);
+  });
+
+  it("omits tool flags when the role declares no tools metadata", async () => {
+    const script = fakeValid(tempDir("gxdev-bin-"));
+    const { work, stores } = harness(script, true);
+    const runner = new PiAgentRunner({
+      config: makeConfig(script),
+      agentsDir: agentsDirWithTools(null),
+    });
+    await runner.run("researcher", "Default tools probe.", { ...work, writableRoots: [] });
+    const argv = readLines(stores.argvFile);
+    assert.equal(argv.indexOf("--tools"), -1);
+    assert.equal(argv.indexOf("--no-tools"), -1);
+  });
+});
+
+describe("PiAgentRunner inherited model (parent session model/thinking)", () => {
+  it("pins the parent session model when an explicit selection is inherit", async () => {
+    const script = fakeValid(tempDir("gxdev-bin-"));
+    const { work, stores } = harness(script, true);
+    // researcher.md pins a model; the explicit "inherit" must resolve to the
+    // parent session's spec instead of the pin or the child's default.
+    const runner = new PiAgentRunner({
+      config: makeConfig(script),
+      agentsDir: REAL_AGENTS_DIR,
+      explicitModels: { researcher: "inherit" },
+      inheritedModel: "parent-session/model:high",
+    });
+
+    const result = await runner.run("researcher", "Inherit parent model.", work);
+
+    assert.equal(result.ok, true);
+    const argv = readLines(stores.argvFile);
+    const m = argv.indexOf("--model");
+    assert.notEqual(m, -1, "inherit must resolve explicitly to the parent session model");
+    assert.equal(argv[m + 1], "parent-session/model:high");
+  });
+
+  it("ignores inheritedModel when an explicit spec is set", async () => {
+    const script = fakeValid(tempDir("gxdev-bin-"));
+    const { work, stores } = harness(script, true);
+    const runner = new PiAgentRunner({
+      config: makeConfig(script),
+      agentsDir: REAL_AGENTS_DIR,
+      explicitModels: { researcher: "x/y:low" },
+      inheritedModel: "parent-session/model:high",
+    });
+
+    await runner.run("researcher", "Explicit wins.", work);
+    const argv = readLines(stores.argvFile);
+    assert.equal(argv[argv.indexOf("--model") + 1], "x/y:low");
+  });
+
+  it("ignores inheritedModel when a role frontmatter pin applies", async () => {
+    const script = fakeValid(tempDir("gxdev-bin-"));
+    const { work, stores } = harness(script, true);
+    // No explicit config: the researcher frontmatter pin wins over the
+    // parent session model.
+    const runner = new PiAgentRunner({
+      config: makeConfig(script),
+      agentsDir: REAL_AGENTS_DIR,
+      inheritedModel: "parent-session/model:high",
+    });
+
+    await runner.run("researcher", "Frontmatter wins.", work);
+    const argv = readLines(stores.argvFile);
+    assert.equal(argv[argv.indexOf("--model") + 1], GLM_53_FLASH_MAX);
+  });
+
+  it("omits --model when inherit resolves and no parent model is known", async () => {
+    const script = fakeValid(tempDir("gxdev-bin-"));
+    const agentsDir = tempDir("gxdev-agents-");
+    writeFileSync(
+      join(agentsDir, "researcher.md"),
+      "---\nname: researcher\ndescription: d\n---\nPlain researcher body.\n",
+    );
+    const { work, stores } = harness(script, true);
+    const runner = new PiAgentRunner({
+      config: makeConfig(script),
+      agentsDir,
+      explicitModels: { researcher: "inherit" },
+    });
+
+    await runner.run("researcher", "Inherit without parent info.", work);
+    assert.equal(readLines(stores.argvFile).indexOf("--model"), -1);
   });
 });

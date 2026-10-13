@@ -1,11 +1,33 @@
+/**
+ * Unit tests for the filesystem memory store.
+ *
+ * Mutual exclusion between independent processes is a directory lease
+ * (domain/lease.ts) published at `<root>/.lock/owner.json`: a LIVE owner is
+ * refused (age is never a takeover criterion) and a DEAD owner (crashed
+ * process) is reclaimed, leaving its token's tombstone retained. The old
+ * age-based `.lock` FILE protocol — stale files were taken over by mtime —
+ * is gone: a leftover lock FILE now fails closed with manual recovery
+ * instructions instead of being stolen or auto-replaced.
+ */
+
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { FsMemoryStore } from "../../extensions/gx-dev/memory/store.ts";
-import type { MemoryProposal } from "../../extensions/gx-dev/domain/interfaces.ts";
+import { acquireFileLease, reclaimedTombstonePath } from "../../extensions/gx-dev/domain/lease.ts";
+import type { MemoryCoordinator, MemoryProposal } from "../../extensions/gx-dev/domain/interfaces.ts";
 
 const tempDirs: string[] = [];
 
@@ -40,6 +62,46 @@ function logLines(root: string): number {
   return readFileSync(join(root, "log.md"), "utf8")
     .split(/\r?\n/)
     .filter((l) => l.startsWith("- ")).length;
+}
+
+function lockPathOf(root: string): string {
+  return join(root, ".lock");
+}
+
+/** The owner record of a published lease directory. */
+function readOwner(lock: string): { pid: number; token: string; acquiredAt: string } {
+  return JSON.parse(readFileSync(join(lock, "owner.json"), "utf8")) as {
+    pid: number;
+    token: string;
+    acquiredAt: string;
+  };
+}
+
+/** Publishes a lease directory exactly as domain/lease.ts would. */
+function forgeOwner(lock: string, owner: { pid: number; token: string; acquiredAt: string }): void {
+  mkdirSync(lock, { recursive: true });
+  writeFileSync(join(lock, "owner.json"), JSON.stringify(owner), "utf8");
+}
+
+/** A real, provably gone pid: spawn a child, SIGKILL it, await its exit. */
+async function makeDeadPid(): Promise<number> {
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)"], {
+    stdio: "ignore",
+  });
+  const pid = child.pid ?? -1;
+  child.kill("SIGKILL");
+  await new Promise<void>((resolveExit) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolveExit();
+      return;
+    }
+    child.on("exit", () => resolveExit());
+  });
+  return pid;
+}
+
+function daysAgoIso(days: number): string {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
 test("constructor scaffolds index, log, SCHEMA and subdirectories", () => {
@@ -218,4 +280,294 @@ test("log.md grows exactly one line per promote", async () => {
   const log = readFileSync(join(root, "log.md"), "utf8");
   assert.ok(log.includes(` ${p1.runId} create ${p1.page}`));
   assert.ok(log.includes(` ${p2.runId} update ${p2.page}`));
+});
+
+test("unsafe and generated page names are rejected on reserve and promote", async () => {
+  const root = makeRoot();
+  const store = new FsMemoryStore(root);
+  const unsafe = [
+    "../evil",
+    "a/../b",
+    "/abs/path",
+    "features/./x",
+    "features//x",
+    "a\\\\b",
+    "features/trailing/",
+    ".",
+    "..",
+    "  spaced  ",
+  ];
+  for (const name of unsafe) {
+    await assert.rejects(() => store.reserve([proposal({ page: name })]), /unsafe memory page name/);
+    await assert.rejects(() => store.promote([proposal({ page: name })]), /unsafe memory page name/);
+  }
+  // index.md and log.md are store-generated; promotion must not clobber them.
+  for (const name of ["index", "log"]) {
+    await assert.rejects(() => store.reserve([proposal({ page: name })]), /generated/);
+    await assert.rejects(() => store.promote([proposal({ page: name })]), /generated/);
+  }
+  // Nothing was written outside the root or into the namespace dirs.
+  assert.ok(!existsSync(join(root, "evil.md")));
+  assert.equal(readFileSync(join(root, "index.md"), "utf8").includes("[["), true);
+});
+
+test("promote redacts inherited frontmatter as well as body", async () => {
+  const root = makeRoot();
+  const store = new FsMemoryStore(root, { redact: true });
+  writeFileSync(
+    join(root, "features", "leaky.md"),
+    [
+      "---",
+      "provenance: earlier-run",
+      "scope: global",
+      "freshness: 2025-01-01",
+      "verification: NOT VERIFIED",
+      "confidence: low",
+      "updated: 2025-01-01",
+      "gh_token: ghp_APIKEYSAMPLE12345",
+      "---",
+      "",
+      "## Summary",
+      "",
+      "Old body. See [[conventions]].",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const p = proposal({
+    page: "features/leaky",
+    action: "update",
+    body: "## Summary\n\npassword: hunter2x stays hidden. See [[conventions]].\n",
+  });
+  const result = await store.promote([p]); // no reserve: still safe, still redacted
+  assert.deepEqual(result.conflicts, []);
+  const raw = readFileSync(join(root, "features", "leaky.md"), "utf8");
+  assert.ok(raw.includes("[REDACTED:api-token]"), "frontmatter token redacted");
+  assert.ok(raw.includes("[REDACTED:assignment]"), "body assignment redacted");
+  assert.ok(!raw.includes("ghp_"));
+  assert.ok(!raw.includes("hunter2x"));
+  assert.ok(raw.includes("gh_token: [REDACTED:api-token]"), "inherited key kept, value redacted");
+  assert.ok(raw.includes("confidence: low"), "unrelated inherited fields preserved");
+});
+
+test("lintProposals previews structural issues without blocking promote", async () => {
+  const root = makeRoot();
+  const store = new FsMemoryStore(root);
+  assert.deepEqual(store.lintProposals([proposal()]), { ok: true, issues: [] });
+
+  const bad = proposal({
+    page: "features/proposed",
+    body: "No summary heading and no links.",
+    provenance: [],
+    scope: "",
+    freshness: "not-a-date",
+  });
+  const preview = store.lintProposals([bad]);
+  assert.equal(preview.ok, false);
+  const joined = preview.issues.join("\n");
+  assert.ok(joined.includes("features/proposed: missing required heading '## Summary'"));
+  assert.ok(joined.includes("orphan risk"));
+  assert.ok(joined.includes("provenance has no entries"));
+  assert.ok(joined.includes("scope is empty"));
+  assert.ok(joined.includes("freshness is not an ISO date"));
+
+  // Advisory only: promote still applies reviewed content with lint findings.
+  const result = await store.promote([{ ...bad, provenance: ["reviewer:x"] }]);
+  assert.deepEqual(result.applied, ["features/proposed"]);
+
+  // Broken links resolve against disk pages and the proposed set.
+  const crossLink = proposal({
+    page: "features/linking",
+    body: "## Summary\n\nSee [[features/proposed]] and [[missing-page]].\n",
+  });
+  const linkPreview = store.lintProposals([crossLink]);
+  assert.ok(linkPreview.issues.join("\n").includes("broken [[link]] target 'missing-page'"));
+  assert.ok(!linkPreview.issues.some((i) => i.includes("features/proposed]]")));
+
+  // Secret-like bodies are flagged; mutable state smells surface too.
+  const flagged = store.lintProposals([
+    proposal({ body: "## Summary\n\ntoken: superspecialtoken99. See [[conventions]].\n" }),
+    proposal({ body: `## Summary\n\nDeployed ${"a".repeat(40)} today. See [[conventions]].\n` }),
+  ]);
+  const flaggedJoined = flagged.issues.join("\n");
+  assert.ok(flaggedJoined.includes("secret-like content"));
+  assert.ok(flaggedJoined.includes("copied mutable state"));
+});
+
+test("reserved revisions are durable across store restarts", async () => {
+  const root = makeRoot();
+  const first = new FsMemoryStore(root);
+  const p = proposal({ page: "features/durable", runId: "run-1" });
+  const reserved = await first.reserve([p]);
+  assert.equal(reserved[0]?.action, "create");
+  // The durable claim carries the run's expected revision.
+  const indexRaw = readFileSync(join(root, "index.md"), "utf8");
+  assert.ok(indexRaw.includes("planned by run-1 (expected: run-1=absent)"));
+
+  // A fresh instance (restart) reloads the expectation from disk.
+  const restarted = new FsMemoryStore(root);
+  const ok = await restarted.promote(reserved); // page unchanged since reserve
+  assert.deepEqual(ok.applied, ["features/durable"]);
+  assert.deepEqual(ok.conflicts, []);
+
+  // And the same for a second reservation taken by yet another instance.
+  const third = new FsMemoryStore(root);
+  const upd = proposal({
+    page: "features/durable",
+    action: "update",
+    runId: "run-2",
+    body: "## Summary\n\nNewer. See [[conventions]].\n",
+  });
+  const reserved2 = await third.reserve([upd]);
+  writeFileSync(
+    join(root, "features", "durable.md"),
+    "---\nprovenance: external\n---\n\n## Summary\n\nExternal edit. See [[conventions]].\n",
+    "utf8",
+  );
+  const conflicted = await third.promote(reserved2);
+  assert.deepEqual(conflicted.applied, []);
+  assert.ok(conflicted.conflicts.includes("features/durable"));
+  assert.ok(!readFileSync(join(root, "features", "durable.md"), "utf8").includes("Newer."));
+});
+
+test("conflicts and release(runId) clear reservation claims", async () => {
+  const root = makeRoot();
+  const store = new FsMemoryStore(root);
+  const p = proposal({ page: "features/clearme", runId: "run-z" });
+  await store.reserve([p]);
+  const index = () => readFileSync(join(root, "index.md"), "utf8");
+  assert.ok(index().includes("planned by run-z"));
+
+  writeFileSync(
+    join(root, "features", "clearme.md"),
+    "---\nprovenance: x\n---\n\n## Summary\n\nRace winner. See [[conventions]].\n",
+    "utf8",
+  );
+  const result = await store.promote([p]);
+  assert.ok(result.conflicts.includes("features/clearme"));
+  assert.ok(!index().includes("planned by run-z"), "conflicted claim is dropped");
+
+  // release(runId) drops claims without promoting anything.
+  const other = proposal({ page: "features/cancelled", runId: "run-q" });
+  await store.reserve([other]);
+  assert.ok(index().includes("planned by run-q"));
+  await store.release("run-q");
+  assert.ok(!index().includes("planned by run-q"));
+  assert.ok(!existsSync(join(root, "features", "cancelled.md")), "release never writes pages");
+  // Releasing an unknown run is a no-op.
+  await store.release("run-q");
+});
+
+test("constructor scaffolding never overwrites existing pages (exclusive create)", () => {
+  const repo = mkdtempSync(join(tmpdir(), "gx-mem-"));
+  tempDirs.push(repo);
+  const root = join(repo, ".gx-dev", "memory");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(
+    join(root, "architecture.md"),
+    "---\nprovenance: human\n---\n\n## Summary\n\nHand written by a user.\n",
+    "utf8",
+  );
+  new FsMemoryStore(root); // racing scaffold must not placeholder the page
+  assert.match(readFileSync(join(root, "architecture.md"), "utf8"), /Hand written by a user\./);
+  // The remaining core pages still scaffold, and the store stays consistent.
+  assert.ok(existsSync(join(root, "project-overview.md")));
+  assert.ok(existsSync(join(root, "testing.md")));
+});
+
+test("a live memory lease is refused regardless of age; the holder is named and the lock is never touched", async () => {
+  const root = makeRoot();
+  const store = new FsMemoryStore(root, { lockRetryMs: 150 });
+  const lock = lockPathOf(root);
+  // A LIVE owner recorded 30 days ago: under the old protocol its lock file
+  // would eventually be age-taken-over; now age is irrelevant — it is held.
+  forgeOwner(lock, { pid: process.pid, token: "live-old-owner", acquiredAt: daysAgoIso(30) });
+
+  await assert.rejects(() => store.reserve([proposal()]), /held by pid/);
+  await assert.rejects(() => store.promote([proposal()]), /held by pid/);
+  assert.equal(readOwner(lock).token, "live-old-owner", "the refused acquirer never modified the lock");
+
+  // Manual recovery (the holder releases) unblocks the store immediately.
+  rmSync(lock, { recursive: true, force: true });
+  const adjusted = await store.reserve([proposal()]);
+  const result = await store.promote(adjusted);
+  assert.deepEqual(result.conflicts, []);
+  assert.ok(!existsSync(lock), "the store vacates the lease after each operation");
+});
+
+test("a foreign process holding the lease blocks store operations, then releases them", async () => {
+  const root = makeRoot();
+  const store = new FsMemoryStore(root, { lockRetryMs: 150 });
+  const lock = lockPathOf(root);
+  const hold = await acquireFileLease(lock);
+  await assert.rejects(() => store.reserve([proposal()]), /held by pid/);
+  assert.equal(readOwner(lock).pid, process.pid, "the lease stayed with its owner");
+  await hold();
+  assert.ok(!existsSync(lock), "release vacated the lease");
+  const adjusted = await store.reserve([proposal()]);
+  assert.equal(adjusted[0]?.action, "create");
+});
+
+test("a crashed owner's lease is reclaimed through the store; the dead owner's tombstone is retained", async () => {
+  const root = makeRoot();
+  const store = new FsMemoryStore(root);
+  const lock = lockPathOf(root);
+  const deadPid = await makeDeadPid();
+  forgeOwner(lock, { pid: deadPid, token: "dead-memory-owner", acquiredAt: daysAgoIso(30) });
+  const tombstone = reclaimedTombstonePath(lock, "dead-memory-owner");
+
+  const p = proposal();
+  const adjusted = await store.reserve([p]); // reclaims on the first attempt
+  const result = await store.promote(adjusted);
+  assert.deepEqual(result.conflicts, []);
+  assert.ok(existsSync(join(root, `${p.page}.md`)), "the reclaimed store applied the write");
+
+  // The dead owner's record lives on in the permanently retained tombstone.
+  assert.ok(existsSync(tombstone), "the tombstone is retained");
+  assert.equal(JSON.parse(readFileSync(join(tombstone, "owner.json"), "utf8")).token, "dead-memory-owner");
+  assert.ok(!existsSync(lock), "the store vacated the reclaimed lease after the operation");
+});
+
+test("unusable locks fail closed: ownerless, corrupt, and legacy lock FILE objects are never modified; manual recovery unblocks", async () => {
+  const root = makeRoot();
+  const store = new FsMemoryStore(root);
+  const lock = lockPathOf(root);
+
+  // An ownerless lock directory: never guessed dead, never reclaimed, never
+  // deleted, never written to.
+  mkdirSync(lock, { recursive: true });
+  await assert.rejects(() => store.reserve([proposal()]), /owner record/);
+  assert.deepEqual(readdirSync(lock), [], "the ownerless lock was left untouched");
+  rmSync(lock, { recursive: true, force: true });
+
+  // A lock directory with a garbage owner record: refused, content preserved.
+  mkdirSync(lock, { recursive: true });
+  writeFileSync(join(lock, "owner.json"), "not json at all", "utf8");
+  await assert.rejects(() => store.promote([proposal()]), /owner record/);
+  assert.equal(readFileSync(join(lock, "owner.json"), "utf8"), "not json at all");
+  rmSync(lock, { recursive: true, force: true });
+
+  // A leftover lock FILE from the old .lock protocol: never age-taken-over,
+  // never auto-replaced — the store fails closed with manual instructions.
+  const legacy = JSON.stringify({ pid: 4242424, at: "2020-01-01T00:00:00.000Z" });
+  writeFileSync(lock, legacy, "utf8");
+  await assert.rejects(() => store.release("run-a"), /legacy lock FILE/);
+  await assert.rejects(() => store.reserve([proposal()]), /legacy lock FILE/);
+  assert.equal(readFileSync(lock, "utf8"), legacy, "the legacy file was not modified");
+
+  // Manual recovery (remove the file, as the error instructs) unblocks.
+  rmSync(lock, { force: true });
+  await store.release("run-a"); // no claims: a no-op that now succeeds
+  const adjusted = await store.reserve([proposal()]);
+  assert.equal(adjusted[0]?.action, "create");
+});
+
+test("FsMemoryStore remains assignable to the MemoryCoordinator contract", async () => {
+  const store: MemoryCoordinator = new FsMemoryStore(makeRoot());
+  assert.equal(typeof store.reserve, "function");
+  assert.equal(typeof store.promote, "function");
+  assert.equal(typeof store.search, "function");
+  assert.equal(typeof store.lint, "function");
+  const { applied, conflicts } = await store.promote([]);
+  assert.deepEqual({ applied, conflicts }, { applied: [], conflicts: [] });
 });

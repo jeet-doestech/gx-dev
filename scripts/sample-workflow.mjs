@@ -131,6 +131,10 @@ function fakeCompletion(role) {
         ],
         findings: ["src/greet.js exports greet(name); the module is plain ESM."],
         requirementAmbiguities: [],
+        acceptanceCriteria: [
+          'exclaim("hi") returns "hi!"',
+          "test/exclaim.test.js exercises exclaim(name) via node --test",
+        ],
       };
     case "planner":
       return {

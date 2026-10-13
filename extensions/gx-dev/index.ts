@@ -25,6 +25,7 @@
  */
 
 import { join } from "node:path";
+import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
@@ -38,8 +39,9 @@ import { FsArtifactStore } from "./domain/artifacts.ts";
 import type { ArtifactStore, EvidenceRecord } from "./domain/artifacts.ts";
 import { JsonlEventStore } from "./domain/events.ts";
 import type { EventStore, GxEvent, GxEventType } from "./domain/events.ts";
-import { defaultConfig, loadConfig } from "./config.ts";
-import type { GxConfig } from "./config.ts";
+import { defaultConfig, loadConfigWithSources } from "./config.ts";
+import type { GxConfig, ModelRoleKey } from "./config.ts";
+import { TERMINAL_STATES } from "./domain/state.ts";
 import {
   findGxCommand,
   gxArgumentCompletions,
@@ -54,22 +56,54 @@ import { createQuestionUI } from "./ui/questions.ts";
 
 let activeCtx: ExtensionContext | null = null;
 let activeEngine: Engine | null = null;
+let activeRunner: PiAgentRunner | null = null;
 let enginePromise: Promise<Engine> | null = null;
 let widget: GxWorkflowWidget | null = null;
 let bufferedAnswer: string | null = null;
+
+/** Commands that drive run execution (agents, gates, Git integration). */
+const EXECUTION_COMMANDS: ReadonlySet<string> = new Set(["start", "resume", "answer"]);
 
 /** The shared Engine instance for this session, or null until first use. */
 export function getActiveEngine(): Engine | null {
   return activeEngine;
 }
 
+/** True while the engine holds a run that has not reached a terminal state. */
+function engineRunActive(engine: Engine): boolean {
+  const state = engine.status();
+  return state !== null && !TERMINAL_STATES.includes(state.state);
+}
+
+/**
+ * Resolves the hosting session's model into a child-process model spec
+ * (`provider/model` plus `:thinking` when a level is active), or undefined
+ * when no session model is set. Used to pin "inherit" role selections to
+ * the parent's actual model instead of the child pi's own default.
+ */
+export function parentSessionModelSpec(ctx: ExtensionContext): string | undefined {
+  const model = ctx.model;
+  if (!model || typeof model.provider !== "string" || typeof model.id !== "string") {
+    return undefined;
+  }
+  const base = `${model.provider}/${model.id}`;
+  return ctx.thinkingLevel ? `${base}:${ctx.thinkingLevel}` : base;
+}
+
 /**
  * Invalidates the shared engine so the next getEngine() builds a fresh one
  * (fresh PiAgentRunner, fresh config). Called after /gx-dev models persists a
- * new per-role model selection.
+ * new per-role model selection. Throws while a run is active: dropping the
+ * engine mid-run would orphan its child processes and evidence stores.
  */
 export function resetActiveEngine(): void {
+  if (activeEngine !== null && engineRunActive(activeEngine)) {
+    throw new Error(
+      "gx-dev: cannot reset the engine while a run is active — cancel or finish the run first",
+    );
+  }
   activeEngine = null;
+  activeRunner = null;
   enginePromise = null;
 }
 
@@ -161,12 +195,40 @@ class DeferredArtifactStore implements ArtifactStore {
   }
 }
 
-async function buildEngine(ctx: ExtensionContext): Promise<Engine> {
+export interface EngineBuild {
+  engine: Engine;
+  /** The engine's agent runner; shutdown awaits its in-flight children. */
+  runner: PiAgentRunner;
+  /** Effective configuration the engine was built with. */
+  config: GxConfig;
+  /** True when project trust was honored, i.e. .gx-dev/config.json was read. */
+  projectTrusted: boolean;
+}
+
+/**
+ * Builds the engine with production wiring.
+ *
+ * Project configuration (which controls agents.piBinary — an executable —
+ * and every safety policy flag) is honored only when pi reports project
+ * trust for this context; untrusted projects get defaults and their config
+ * file is never read. A trusted project's config that fails strict
+ * validation is a hard error: the build fails closed instead of silently
+ * falling back to defaults that could re-enable behavior the user turned
+ * off. Explicit per-role model selections from the config and the parent
+ * session's model/thinking are passed to the runner so "inherit" resolves
+ * to the session's actual model.
+ */
+export async function buildEngine(ctx: ExtensionContext): Promise<EngineBuild> {
   const repoPath = ctx.cwd;
+  const projectTrusted = ctx.isProjectTrusted();
   let config: GxConfig;
-  try {
-    config = await loadConfig(repoPath);
-  } catch {
+  let explicitModels: Partial<Record<ModelRoleKey, string>> = {};
+  if (projectTrusted) {
+    // Throws on invalid config — fail closed, never default over it.
+    const loaded = await loadConfigWithSources(repoPath);
+    config = loaded.config;
+    explicitModels = loaded.explicitModels;
+  } else {
     config = defaultConfig();
   }
 
@@ -175,6 +237,20 @@ async function buildEngine(ctx: ExtensionContext): Promise<Engine> {
   let engineRef: Engine | null = null;
   const resolveRunId = (): string | null => engineRef?.status()?.runId ?? null;
 
+  const inheritedModel = parentSessionModelSpec(ctx);
+  const runner = new PiAgentRunner({
+    config,
+    agentsDir: resolveAgentsDir(),
+    explicitModels,
+    ...(inheritedModel !== undefined ? { inheritedModel } : {}),
+  });
+  // Read-only commands must not scaffold project state as a side effect.
+  const memoryRoot = join(repoPath, ".gx-dev", "memory");
+  let memoryStore: FsMemoryStore | undefined;
+  const memory = (): FsMemoryStore => {
+    if (!projectTrusted) throw new Error("gx-dev memory requires project trust");
+    return memoryStore ??= new FsMemoryStore(memoryRoot, { redact: config.memory.redactSecrets });
+  };
   const deps: EngineDeps = {
     config,
     ui: createQuestionUI(ctx, {
@@ -187,18 +263,23 @@ async function buildEngine(ctx: ExtensionContext): Promise<Engine> {
         void refreshWidget();
       },
     }),
-    runner: new PiAgentRunner({ config, agentsDir: resolveAgentsDir() }),
+    runner,
     git: new GitWorktreeManager(),
-    memory: new FsMemoryStore(join(repoPath, ".gx-dev", "memory"), {
-      redact: config.memory.redactSecrets,
-    }),
+    memory: {
+      reserve: (proposals) => memory().reserve(proposals),
+      promote: (proposals) => memory().promote(proposals),
+      search: (query, limit) => projectTrusted && existsSync(memoryRoot) ? memory().search(query, limit) : Promise.resolve([]),
+      lint: () => projectTrusted && existsSync(memoryRoot) ? memory().lint() : Promise.resolve({ ok: true, issues: [] }),
+      lintProposals: (proposals) => memory().lintProposals(proposals),
+      release: (runId) => projectTrusted && existsSync(memoryRoot) ? memory().release(runId) : Promise.resolve(),
+    },
     runStore: new FsRunStore(repoPath),
     artifacts: new DeferredArtifactStore(repoPath, resolveRunId),
     events: new DeferredEventStore(repoPath, resolveRunId),
   };
   const engine = new Engine(repoPath, deps);
   engineRef = engine;
-  return engine;
+  return { engine, runner, config, projectTrusted };
 }
 
 function getEngine(): Promise<Engine> {
@@ -209,9 +290,12 @@ function getEngine(): Promise<Engine> {
     // The build result is only adopted while enginePromise still points at
     // this in-flight build — resetActiveEngine() may drop it concurrently.
     const p: Promise<Engine> = buildEngine(ctx)
-      .then((engine) => {
-        if (enginePromise === p) activeEngine = engine;
-        return engine;
+      .then((built) => {
+        if (enginePromise === p) {
+          activeEngine = built.engine;
+          activeRunner = built.runner;
+        }
+        return built.engine;
       })
       .catch((e: unknown) => {
         if (enginePromise === p) enginePromise = null;
@@ -247,6 +331,16 @@ async function dispatch(
   const command = findGxCommand(name);
   if (!command) {
     cmdCtx.ui.notify(`Unknown gx-dev command "${name}".\n${gxUsageText()}`, "warning");
+    return;
+  }
+  // Execution runs agents, gates, and Git integration in this project — and
+  // the engine's configuration (including agents.piBinary) comes from the
+  // project. Refuse to execute when pi does not report project trust.
+  if (EXECUTION_COMMANDS.has(command.name) && !cmdCtx.isProjectTrusted()) {
+    cmdCtx.ui.notify(
+      `gx-dev: project "${cmdCtx.cwd}" is not trusted — refusing to execute gx-dev runs here. Trust the project in pi first.`,
+      "warning",
+    );
     return;
   }
   try {
@@ -293,14 +387,31 @@ export default function activate(pi: ExtensionAPI): void {
     }
   });
 
-  pi.on("session_shutdown", () => {
+  // Graceful shutdown: pause an active run (keeping it resumable — cancel is
+  // reserved for the user), wait for in-flight agent processes to close so
+  // nothing keeps writing after the references are dropped, and only then
+  // release session state. Never drops the engine while a run is mid-flight.
+  pi.on("session_shutdown", async () => {
     widget?.dispose();
     widget = null;
+    const engine = activeEngine;
+    const runner = activeRunner;
     activeEngine = null;
+    activeRunner = null;
     enginePromise = null;
     activeCtx = null;
     bufferedAnswer = null;
     setOutputSink(null);
+    if (engine !== null) {
+      try {
+        await engine.pause();
+      } catch {
+        // No active run (or already terminal) — nothing to pause.
+      }
+    }
+    if (runner !== null) {
+      await runner.whenIdle();
+    }
   });
 
   pi.registerCommand("gx-dev", {

@@ -1,17 +1,29 @@
 /**
  * Final verification gate (PLAN §6.8): reruns every contract command in the
  * staging worktree (all must exit 0) and, when configured, requires a clean
- * git tree. Uses the same allowlist, timeout, and truncation as the test
+ * git tree. The contract must be nonempty — an empty contract never passes,
+ * even when the clean-tree check succeeds (e.g. after an incomplete restart
+ * hydration). Uses the same allowlist, timeout, and truncation as the test
  * gate — the contract was authored under those rules and must survive them.
+ * When an artifact store or archiver callback is supplied, each command's
+ * executable-command metadata plus its raw output is archived as immutable
+ * evidence (the store applies the shared secret-redaction boundary);
+ * failures carry bounded, secret-REDACTED diagnostic output so reroutes see
+ * the real error, not just an exit code.
  */
 
-import { hashContent } from "../domain/artifacts.ts";
+import type { ArtifactStore } from "../domain/artifacts.ts";
 import type { CommandResult } from "../domain/schemas.ts";
 import {
   COMMAND_TIMEOUT_MS,
+  FAILURE_DIAGNOSTIC_BUDGET,
+  FAILURE_DIAGNOSTIC_CHARS,
   MAX_OUTPUT_BYTES,
+  boundedDiagnostic,
+  executeGateCommand,
   isAllowlistedCommand,
   type CommandExecutor,
+  type OutputArchiver,
 } from "./test-gate.ts";
 
 export interface FinalGateResult {
@@ -30,11 +42,25 @@ export async function runFinalGate(input: {
   exec: CommandExecutor;
   requireCleanTree: boolean;
   checkClean: () => Promise<boolean>;
+  /** Optional: archives each executed command's actual output as evidence. */
+  store?: ArtifactStore;
+  /** Optional callback alternative to `store`; returns the recorded ref. */
+  archiveOutput?: OutputArchiver;
 }): Promise<FinalGateResult> {
   const failures: string[] = [];
   const commands: CommandResult[] = [];
 
-  for (const command of input.verificationContract) {
+  const contract = input.verificationContract
+    .map((c) => c.trim())
+    .filter((c) => c !== "");
+  if (contract.length === 0) {
+    failures.push(
+      "verification contract is empty: at least one required command must be executed before final verification can pass",
+    );
+  }
+
+  let diagnosticBudget = FAILURE_DIAGNOSTIC_BUDGET;
+  for (const command of contract) {
     if (!isAllowlistedCommand(command)) {
       commands.push({
         command,
@@ -44,18 +70,25 @@ export async function runFinalGate(input: {
       failures.push(`rejected non-allowlisted verification command: ${command}`);
       continue;
     }
-    const startedAt = Date.now();
-    const run = await input.exec.execute(input.stagingDir, command, COMMAND_TIMEOUT_MS);
-    const truncated = run.truncated || run.output.length > MAX_OUTPUT_BYTES;
-    const output = truncated ? run.output.slice(0, MAX_OUTPUT_BYTES) : run.output;
-    commands.push({
+    const executed = await executeGateCommand({
+      stagingDir: input.stagingDir,
       command,
-      exitCode: run.exitCode,
-      outputRef: `output:${hashContent(output).slice(0, 16)}`,
-      durationMs: Date.now() - startedAt,
+      exec: input.exec,
+      store: input.store,
+      archiveOutput: input.archiveOutput,
+      source: "final-gate",
+      evidenceNamePrefix: "final-gate-output",
     });
-    if (run.exitCode !== 0) {
-      failures.push(`verification command failed with exit ${run.exitCode}: ${command}`);
+    commands.push(executed.result);
+    if (executed.failed) {
+      const diagnostic = boundedDiagnostic(
+        executed.output,
+        Math.min(FAILURE_DIAGNOSTIC_CHARS, diagnosticBudget),
+      );
+      diagnosticBudget = Math.max(0, diagnosticBudget - diagnostic.length);
+      failures.push(
+        `verification command failed with exit ${executed.result.exitCode}: ${command}${diagnostic}`,
+      );
     }
   }
 

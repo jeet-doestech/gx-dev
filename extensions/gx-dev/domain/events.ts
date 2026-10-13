@@ -4,9 +4,21 @@
  * that depend on them wherever practical, and always flushed synchronously.
  */
 
-import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { redactSecrets } from "../memory/redaction.ts";
+
+function redactData(value: unknown): unknown {
+  if (typeof value === "string") return redactSecrets(value).text;
+  if (Array.isArray(value)) return value.map(redactData);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+      /^(?:password|passwd|secret|token|api[-_]?key|authorization)$/i.test(key)
+        ? "[REDACTED:credential]" : redactData(item),
+    ]));
+  }
+  return value;
+}
 
 export type GxEventType =
   | "run_created"
@@ -62,16 +74,20 @@ export class JsonlEventStore implements EventStore {
     message: string,
     data?: Record<string, unknown>,
   ): GxEvent {
+    // Another lease holder may have appended since this instance last read.
+    this.cache = null;
     const prior = this.events();
     const event: GxEvent = {
-      seq: prior.length + 1,
+      seq: prior.reduce((max, entry) => Math.max(max, entry.seq), 0) + 1,
       at: new Date().toISOString(),
       runId: this.readRunId(prior),
       type,
-      message,
-      ...(data === undefined ? {} : { data }),
+      message: redactSecrets(message).text,
+      ...(data === undefined ? {} : { data: redactData(data) as Record<string, unknown> }),
     };
-    appendFileSync(this.file, JSON.stringify(event) + "\n", "utf8");
+    // Preserve an interrupted write verbatim, but keep the next record separate.
+    const raw = existsSync(this.file) ? readFileSync(this.file, "utf8") : "";
+    appendFileSync(this.file, (raw !== "" && !raw.endsWith("\n") ? "\n" : "") + JSON.stringify(event) + "\n", "utf8");
     this.cache = [...prior, event];
     return event;
   }
@@ -83,15 +99,19 @@ export class JsonlEventStore implements EventStore {
       return this.cache;
     }
     const lines = readFileSync(this.file, "utf8").split("\n").filter(Boolean);
-    this.cache = lines.map((l) => JSON.parse(l) as GxEvent);
+    this.cache = lines.flatMap((line): GxEvent[] => {
+      try {
+        const value = JSON.parse(line) as GxEvent;
+        return Number.isInteger(value.seq) && typeof value.type === "string" ? [value] : [];
+      } catch { return []; } // interrupted records remain on disk for inspection
+    });
     return this.cache;
   }
 
   private readRunId(prior: GxEvent[]): string {
     const last = prior[prior.length - 1];
     if (last?.runId) return last.runId;
-    const h = createHash("sha256").update(this.file).digest("hex").slice(0, 12);
-    return `run-${h}`;
+    return basename(dirname(this.file));
   }
 }
 
@@ -114,8 +134,8 @@ export class MemoryEventStore implements EventStore {
       at: new Date().toISOString(),
       runId: this.runId,
       type,
-      message,
-      ...(data === undefined ? {} : { data }),
+      message: redactSecrets(message).text,
+      ...(data === undefined ? {} : { data: redactData(data) as Record<string, unknown> }),
     };
     this.items.push(event);
     return event;
