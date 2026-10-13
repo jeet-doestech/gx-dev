@@ -1,6 +1,10 @@
 /**
  * Unit tests for the adversarial review gate (PLAN §6.7).
  * Local fakes only: no pi APIs, no network.
+ *
+ * Material questions from the reviewer fail the gate closed and are returned
+ * in the result so the engine can ask the user; a blocked status remains a
+ * gate failure.
  */
 
 import assert from "node:assert/strict";
@@ -147,5 +151,81 @@ describe("review gate", () => {
     });
     assert.equal(result.pass, false);
     assert.equal(result.blockingCount, 1);
+  });
+
+  it("fails closed and surfaces material questions from the reviewer", async () => {
+    const completion = {
+      ...reviewerCompletion([
+        { severity: "minor", path: "src/x.ts", remediation: "Rename variable." },
+      ]),
+      questions: [
+        {
+          question: "Should the deprecated endpoint stay behind a flag?",
+          severity: "material" as const,
+        },
+      ],
+    };
+    const result = await runReviewGate({
+      stagingDir: "/tmp/staging",
+      combinedDiff: "diff",
+      requirements: "req",
+      runReviewerAgent: async () => agentResult("reviewer", completion),
+    });
+    assert.equal(result.pass, false, "a material question must fail the gate closed");
+    assert.equal(result.blockingCount, 1);
+    assert.match(result.findings[0]!.remediation, /material question/);
+    assert.match(
+      result.findings[0]!.remediation,
+      /Should the deprecated endpoint stay behind a flag\?/,
+    );
+    assert.equal(result.questions?.length, 1);
+    assert.equal(
+      result.questions?.[0]?.question,
+      "Should the deprecated endpoint stay behind a flag?",
+    );
+    assert.equal(result.questions?.[0]?.severity, "material");
+  });
+
+  it("keeps the reviewer's own findings alongside the material-question finding", async () => {
+    const completion = {
+      ...reviewerCompletion([
+        { severity: "major", path: "src/y.ts", remediation: "Unchecked error path." },
+      ]),
+      questions: [
+        { question: "Drop the legacy format now?", severity: "material" as const },
+      ],
+    };
+    const result = await runReviewGate({
+      stagingDir: "/tmp/staging",
+      combinedDiff: "diff",
+      requirements: "req",
+      runReviewerAgent: async () => agentResult("reviewer", completion),
+    });
+    assert.equal(result.pass, false);
+    assert.equal(result.blockingCount, 2, "material question finding + major finding");
+    assert.ok(result.findings.some((f) => f.remediation === "Unchecked error path."));
+    assert.equal(result.questions?.length, 1);
+  });
+
+  it("passes with only minor questions and reports them in the result", async () => {
+    const completion = {
+      ...reviewerCompletion([
+        { severity: "info", remediation: "Consider a JSDoc comment." },
+      ]),
+      questions: [
+        { question: "Add benchmarks in a follow-up?", severity: "minor" as const },
+      ],
+    };
+    const result = await runReviewGate({
+      stagingDir: "/tmp/staging",
+      combinedDiff: "diff",
+      requirements: "req",
+      runReviewerAgent: async () => agentResult("reviewer", completion),
+    });
+    assert.equal(result.pass, true);
+    assert.equal(result.blockingCount, 0);
+    assert.equal(result.questions?.length, 1);
+    assert.equal(result.questions?.[0]?.question, "Add benchmarks in a follow-up?");
+    assert.equal(result.questions?.[0]?.severity, "minor");
   });
 });

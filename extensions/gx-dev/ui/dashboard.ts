@@ -4,7 +4,10 @@
  *
  * Built on pi's documented overlay API (`ctx.ui.custom(..., { overlay: true })`,
  * extensions.md "Custom Components / Overlay Mode", tui.md "Overlays") with
- * keyboard input via `matchesKey` (tui.md "Keyboard Input").
+ * keyboard input via `matchesKey` (tui.md "Keyboard Input"). While open, the
+ * view refreshes itself from disk (state.json + events.jsonl) on an interval;
+ * with no active run it binds to the newest recorded run instead. The refresh
+ * timer is disposed when the overlay closes.
  */
 
 import type { ContextUsage, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
@@ -14,7 +17,7 @@ import { dirname, join } from "node:path";
 import type { Engine } from "../orchestration/engine.ts";
 import type { GxEvent } from "../domain/events.ts";
 import { JsonlEventStore } from "../domain/events.ts";
-import { runDir } from "../domain/persist.ts";
+import { FsRunStore, runDir } from "../domain/persist.ts";
 import type { RunState } from "../domain/state.ts";
 import { isControl } from "../domain/state.ts";
 import { WORKTREE_DIRNAME } from "../git/worktrees.ts";
@@ -31,6 +34,14 @@ import {
 
 /** Number of recent events shown in the scrollable window. */
 export const DASHBOARD_EVENT_WINDOW = 20;
+
+/**
+ * How often the dashboard re-reads run state and events from disk while the
+ * overlay is open (docs/tui.md "Overlays": overlay components are disposed
+ * when closed and must not be reused, so the refresh timer is owned by
+ * showDashboard() and cleared in a finally block around ctx.ui.custom()).
+ */
+export const DASHBOARD_REFRESH_MS = 2000;
 
 interface UsageTotals {
   inputTokens: number;
@@ -87,32 +98,48 @@ function gateLabel(theme: Theme, ok: boolean, consecutiveFailures: number): stri
 interface DashboardData {
   readonly tui: TUI;
   readonly theme: Theme;
-  readonly state: RunState | null;
-  readonly events: readonly GxEvent[];
+  readonly snapshot: DashboardSnapshot;
   readonly contextUsage: ContextUsage | undefined;
   readonly onClose: () => void;
+}
+
+/**
+ * Everything the dashboard renders, replaced wholesale on each refresh tick.
+ * `live` is true when `state` is the engine's in-process run (this session
+ * drives it); false when the state/events come from disk for a recorded run
+ * (no active run — the dashboard then shows the run it was opened with).
+ */
+interface DashboardSnapshot {
+  readonly state: RunState | null;
+  readonly events: readonly GxEvent[];
+  readonly live: boolean;
 }
 
 class DashboardView implements Component {
   private scroll = 0;
   private readonly tui: TUI;
   private readonly theme: Theme;
-  private readonly state: RunState | null;
-  private readonly events: readonly GxEvent[];
-  private readonly contextUsage: ContextUsage | undefined;
+  private snapshot: DashboardSnapshot;
+  private contextUsage: ContextUsage | undefined;
   private readonly onClose: () => void;
 
   constructor(data: DashboardData) {
     this.tui = data.tui;
     this.theme = data.theme;
-    this.state = data.state;
-    this.events = data.events;
+    this.snapshot = data.snapshot;
     this.contextUsage = data.contextUsage;
     this.onClose = data.onClose;
   }
 
+  /** Replaces the rendered data (refresh tick) and triggers a redraw. */
+  applySnapshot(snapshot: DashboardSnapshot, contextUsage: ContextUsage | undefined): void {
+    this.snapshot = snapshot;
+    this.contextUsage = contextUsage;
+    this.tui.requestRender();
+  }
+
   handleInput(data: string): void {
-    const maxScroll = Math.max(0, this.events.length - DASHBOARD_EVENT_WINDOW);
+    const maxScroll = Math.max(0, this.snapshot.events.length - DASHBOARD_EVENT_WINDOW);
     if (matchesKey(data, Key.escape)) {
       this.onClose();
       return;
@@ -137,19 +164,22 @@ class DashboardView implements Component {
 
   private buildLines(width: number): string[] {
     const th = this.theme;
-    const state = this.state;
+    const state = this.snapshot.state;
+    const events = this.snapshot.events;
     const lines: string[] = [];
     const rule = th.fg("border", "\u2500".repeat(Math.min(width, 64)));
 
     if (state) {
       const startedAt = state.history[0]?.at ?? state.createdAt;
+      const liveBadge = this.snapshot.live ? "" : th.fg("muted", " \u00B7 recorded (no active run)");
       lines.push(
         th.fg("accent", th.bold(`gx-dev run ${shortRunId(state.runId)}`)) +
-          th.fg("muted", ` \u00B7 ${state.state} \u00B7 ${formatElapsed(startedAt)} \u00B7 ${countersSummary(state.counters)}`),
+          th.fg("muted", ` \u00B7 ${state.state} \u00B7 ${formatElapsed(startedAt)} \u00B7 ${countersSummary(state.counters)}`) +
+          liveBadge,
       );
       lines.push(th.fg("dim", `request: ${state.request}`));
     } else {
-      lines.push(th.fg("muted", th.bold("gx-dev \u00B7 no active run")));
+      lines.push(th.fg("muted", th.bold("gx-dev \u00B7 no active run, no recorded run")));
     }
     lines.push(rule);
 
@@ -194,7 +224,7 @@ class DashboardView implements Component {
             `  ${countersSummary(c)} \u00B7 infra retries: ${c.infrastructureRetries} \u00B7 total attempts: ${c.totalAttempts}`,
           ),
       );
-      const gateEvents = this.events.filter(
+      const gateEvents = events.filter(
         (e) => e.type === "gate_passed" || e.type === "gate_failed",
       ).length;
       lines.push(
@@ -208,7 +238,7 @@ class DashboardView implements Component {
 
       // Worktrees: prefer run events, fall back to the conventional path.
       lines.push(th.fg("muted", th.bold("WORKTREES")));
-      const paths = worktreePathsFromEvents(this.events);
+      const paths = worktreePathsFromEvents(events);
       if (paths.length > 0) {
         for (const p of paths) lines.push(th.fg("text", `  ${p}`));
       } else {
@@ -218,7 +248,7 @@ class DashboardView implements Component {
     }
 
     // Token usage: agent-reported usage plus the hosting session's context.
-    const totals = usageFromEvents(this.events);
+    const totals = usageFromEvents(events);
     if (totals.inputTokens > 0 || totals.outputTokens > 0 || this.contextUsage) {
       let tokensLine =
         th.fg("muted", th.bold("TOKENS")) +
@@ -235,7 +265,7 @@ class DashboardView implements Component {
     lines.push(rule);
 
     // Recent events, newest last, scrolled back with arrow keys.
-    const total = this.events.length;
+    const total = events.length;
     const end = Math.max(0, total - this.scroll);
     const start = Math.max(0, end - DASHBOARD_EVENT_WINDOW);
     lines.push(
@@ -247,7 +277,7 @@ class DashboardView implements Component {
             : "  none recorded",
         ),
     );
-    for (const e of this.events.slice(start, end)) {
+    for (const e of events.slice(start, end)) {
       lines.push(th.fg(eventColorToken(e.type), `  ${renderEvent(e).slice(0, EVENT_MESSAGE_MAX + 24)}`));
     }
     lines.push("");
@@ -256,9 +286,13 @@ class DashboardView implements Component {
   }
 }
 
-async function loadEvents(engine: Engine, state: RunState | null): Promise<GxEvent[]> {
-  // The engine keeps its event store private; if it ever exposes an accessor,
-  // prefer it, otherwise read the append-only audit trail from the run dir.
+/**
+ * Reads the run's events, preferring an engine-exposed accessor when one
+ * exists, otherwise the append-only on-disk audit trail. A FRESH
+ * JsonlEventStore is constructed per read: the class caches events after the
+ * first read, so a shared instance would freeze the dashboard at open time.
+ */
+async function loadEvents(cwd: string, runId: string | null, engine: Engine): Promise<GxEvent[]> {
   const anyEngine = engine as { events?: () => unknown };
   if (typeof anyEngine.events === "function") {
     try {
@@ -268,9 +302,9 @@ async function loadEvents(engine: Engine, state: RunState | null): Promise<GxEve
       // fall back to the on-disk audit trail
     }
   }
-  if (state) {
+  if (runId !== null) {
     try {
-      return new JsonlEventStore(runDir(state.repoPath, state.runId)).events();
+      return new JsonlEventStore(runDir(cwd, runId)).events();
     } catch {
       return [];
     }
@@ -279,28 +313,94 @@ async function loadEvents(engine: Engine, state: RunState | null): Promise<GxEve
 }
 
 /**
- * Shows the dashboard overlay for the engine's current run. Resolves when the
- * user closes it (esc/q). Falls back to a one-line status in non-TUI modes.
+ * One refresh tick: the engine's live status when it still owns the bound
+ * run, otherwise state.json re-read from disk (another process may have
+ * resumed the run); plus the events audit trail from disk. Disk state is
+ * preferred over a staler live snapshot by `updatedAt` comparison.
+ */
+async function readSnapshot(
+  cwd: string,
+  engine: Engine,
+  runId: string | null,
+): Promise<DashboardSnapshot> {
+  const liveState = engine.status();
+  const live = liveState !== null && liveState.runId === runId;
+  let state: RunState | null = live ? liveState : null;
+  if (!live && runId !== null) {
+    try {
+      const diskState = await new FsRunStore(cwd).load(runId);
+      if (diskState !== null && (state === null || diskState.updatedAt > state.updatedAt)) {
+        state = diskState;
+      }
+    } catch {
+      // keep the live/last-known state
+    }
+  }
+  const events = await loadEvents(cwd, runId, engine);
+  return { state, events, live };
+}
+
+/**
+ * Shows the dashboard overlay for the engine's current run, or — when no run
+ * is active — for the newest recorded run (history remains inspectable).
+ * While open, state and events are re-read from disk on an interval and the
+ * view re-renders; the timer is always cleared when the overlay closes
+ * (finally around ctx.ui.custom), so no refresh outlives the component.
+ * Resolves when the user closes it (esc/q). Falls back to a one-line status
+ * in non-TUI modes.
  */
 export async function showDashboard(ctx: ExtensionContext, engine: Engine): Promise<void> {
   if (ctx.mode !== "tui" || !ctx.hasUI) {
     ctx.ui.notify("gx-dev dashboard requires interactive TUI mode; use /gx-dev status", "warning");
     return;
   }
-  const state: RunState | null = engine.status();
-  const events = await loadEvents(engine, state);
-  const contextUsage = ctx.getContextUsage();
-  await ctx.ui.custom<string | null>(
-    (tui, theme, _keybindings, done) =>
-      new DashboardView({ tui, theme, state, events, contextUsage, onClose: () => done(null) }),
-    {
-      overlay: true,
-      overlayOptions: {
-        anchor: "center",
-        width: "85%",
-        minWidth: 64,
-        maxHeight: "95%",
+  const live = engine.status();
+  const runId = live?.runId
+    ?? ((await new FsRunStore(ctx.cwd).list())[0]?.runId ?? null);
+  const initial = await readSnapshot(ctx.cwd, engine, runId);
+  const viewRef: { view: DashboardView | null } = { view: null };
+  const refresh = async (): Promise<void> => {
+    const view = viewRef.view;
+    if (view === null) return; // overlay closed (or not yet opened)
+    try {
+      const snapshot = await readSnapshot(ctx.cwd, engine, runId);
+      view.applySnapshot(snapshot, ctx.getContextUsage());
+    } catch {
+      // keep the last good frame; the next tick retries
+    }
+  };
+  const timer = setInterval(() => {
+    void refresh();
+  }, DASHBOARD_REFRESH_MS);
+  // Never hold the host process open just for the refresh timer.
+  timer.unref();
+  try {
+    await ctx.ui.custom<string | null>(
+      (tui, theme, _keybindings, done) => {
+        const view = new DashboardView({
+          tui,
+          theme,
+          snapshot: initial,
+          contextUsage: ctx.getContextUsage(),
+          onClose: () => done(null),
+        });
+        viewRef.view = view;
+        return view;
       },
-    },
-  );
+      {
+        overlay: true,
+        overlayOptions: {
+          anchor: "center",
+          width: "85%",
+          minWidth: 64,
+          maxHeight: "95%",
+        },
+      },
+    );
+  } finally {
+    // Proper disposal: the overlay component is discarded by pi on close;
+    // drop our reference and stop the disk-refresh interval.
+    clearInterval(timer);
+    viewRef.view = null;
+  }
 }

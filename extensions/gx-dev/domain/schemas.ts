@@ -74,6 +74,8 @@ export interface ResearcherCompletion extends CompletionBase {
   sources: SourceRef[];
   findings: string[];
   requirementAmbiguities: string[];
+  /** Observable outcomes the delivered request must satisfy (acceptance contract). */
+  acceptanceCriteria: string[];
 }
 
 export interface PlannerTask {
@@ -150,6 +152,25 @@ function strArray(v: unknown, label: string, errors: string[]): string[] {
   for (const item of v) {
     if (!str(item)) errors.push(`${label}: every item must be a string`);
     else out.push(item);
+  }
+  return out;
+}
+
+/**
+ * Collects string entries and enforces the required non-empty contract: at
+ * least one non-blank entry. Fail-closed at schema time — earlier and cheaper
+ * than any downstream gate check. A missing field is reported by `strArray`
+ * alone; the non-empty violation is reported only for an actual array.
+ */
+function requiredNonEmptyStrArray(
+  v: unknown,
+  label: string,
+  errors: string[],
+  requirement: string,
+): string[] {
+  const out = strArray(v, label, errors);
+  if (Array.isArray(v) && (out.length === 0 || out.some((s) => s.trim() === ""))) {
+    errors.push(`${label}: ${requirement}`);
   }
   return out;
 }
@@ -275,6 +296,12 @@ export function validateCompletion(
         sources,
         findings: strArray(parsed["findings"], "findings", errors),
         requirementAmbiguities: strArray(parsed["requirementAmbiguities"], "requirementAmbiguities", errors),
+        acceptanceCriteria: requiredNonEmptyStrArray(
+          parsed["acceptanceCriteria"],
+          "acceptanceCriteria",
+          errors,
+          "required non-empty array of non-blank strings describing observable request outcomes",
+        ),
       };
       break;
     }
@@ -306,7 +333,12 @@ export function validateCompletion(
       completion = {
         ...base,
         tasks,
-        verificationContract: strArray(parsed["verificationContract"], "verificationContract", errors),
+        verificationContract: requiredNonEmptyStrArray(
+          parsed["verificationContract"],
+          "verificationContract",
+          errors,
+          "required non-empty array of non-blank runnable commands",
+        ),
         rollbackPlan: str(parsed["rollbackPlan"]) ? (parsed["rollbackPlan"] as string) : "",
       };
       if (completion.rollbackPlan === "") errors.push("rollbackPlan: required string");

@@ -1,12 +1,13 @@
 /**
  * Unit tests for the gx-dev git integration + commit layer: diff helpers,
- * commitStaged application (merge-commit / fast-forward, stale-base and
- * dirty-tree refusals), and the deterministic commit message builder.
+ * commitStaged application (merge-commit / fast-forward, stale-base,
+ * symbolic-branch and dirty-tree refusals, history-preserving revert
+ * rollback), and the deterministic commit message builder.
  * Uses real git in per-test temp repositories under os.tmpdir().
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test, type TestContext } from "node:test";
@@ -122,8 +123,8 @@ test("commitStaged creates a merge commit on an unchanged base and returns rollb
   assert.equal(applied.commitHash, postHead.stdout.trim());
   assert.notEqual(applied.commitHash, base);
 
-  assert.ok(applied.rollbackCommand.startsWith(`git reset --hard ${base} `));
-  assert.ok(applied.rollbackCommand.includes(`git branch -f main ${base}`));
+  assert.ok(applied.rollbackCommand.startsWith("git revert --no-edit --mainline 1 "));
+  assert.equal(applied.rollbackCommand, `git revert --no-edit --mainline 1 ${applied.commitHash}`);
 
   const log = await git(repo, ["log", "--format=%B", "-1"]);
   assert.equal(log.code, 0, log.stderr);
@@ -143,7 +144,20 @@ test("commitStaged uses the fast-forward path when gx-dev.ffOnly is true", { tim
   const cfg = await git(repo, ["config", "gx-dev.ffOnly", "true"]);
   assert.equal(cfg.code, 0, cfg.stderr);
 
-  const applied = await manager.commitStaged(handles, "unused on ff", "main");
+  // Tree of the staging result before the apply: the provenance marker the
+  // fast-forward appends must keep it byte-identical.
+  const preTree = await git(repo, ["rev-parse", `${handles.branches.staging}^{tree}`]);
+  assert.equal(preTree.code, 0, preTree.stderr);
+
+  // The engine message is not "unused" on the fast-forward path anymore: it
+  // is written verbatim into the provenance marker commit.
+  const message = buildCommitMessage({
+    request: "Add the export widget",
+    runId: "run-commit-ff",
+    artifacts: ["dev.txt", "test.txt"],
+    strategy: "fast-forward",
+  });
+  const applied = await manager.commitStaged(handles, message, "main");
   assert.equal(applied.strategy, "fast-forward");
 
   const stagingTip = await git(repo, ["rev-parse", handles.branches.staging]);
@@ -152,6 +166,88 @@ test("commitStaged uses the fast-forward path when gx-dev.ffOnly is true", { tim
   const head = await git(repo, ["rev-parse", "HEAD"]);
   assert.equal(head.stdout.trim(), stagingTip.stdout.trim());
   assert.notEqual(head.stdout.trim(), base);
+
+  // The applied tip carries the exact engine message including the run-id
+  // trailer, so COMMIT crash reconciliation can recognize it...
+  const log = await git(repo, ["log", "--format=%B", "-1", applied.commitHash]);
+  assert.equal(log.code, 0, log.stderr);
+  assert.equal(log.stdout.trim(), message.trim());
+  assert.ok(log.stdout.includes("Run-id: run-commit-ff"));
+  assert.ok(log.stdout.includes("gx-dev(commit-ff): Add the export widget"));
+
+  // ...without dirtying or modifying the integrated tree.
+  const postTree = await git(repo, ["rev-parse", `${applied.commitHash}^{tree}`]);
+  assert.equal(postTree.stdout.trim(), preTree.stdout.trim());
+  const workingTreeDiff = await git(repo, ["diff", "--stat", applied.commitHash]);
+  assert.equal(workingTreeDiff.stdout.trim(), "", "working tree must match the applied commit");
+
+  // The main repo working tree contains the integrated result.
+  assert.ok(readFileSync(join(repo, "dev.txt"), "utf8").includes("developer output"));
+  assert.ok(readFileSync(join(repo, "test.txt"), "utf8").includes("test output"));
+
+  await manager.cleanup(handles, { force: true });
+});
+
+test("a retried fast-forward apply never appends a duplicate provenance marker", { timeout: 30000 }, async (t) => {
+  const { repo, manager, base, handles } = await prepareAndIntegrate(t, "run-commit-ff-retry");
+
+  const cfg = await git(repo, ["config", "gx-dev.ffOnly", "true"]);
+  assert.equal(cfg.code, 0, cfg.stderr);
+
+  const message = buildCommitMessage({
+    request: "Retry-safe application",
+    runId: "run-commit-ff-retry",
+    artifacts: [],
+    strategy: "fast-forward",
+  });
+
+  // Simulate a crashed first attempt: the provenance marker landed on the
+  // staging branch, then the process died before the fast-forward.
+  const marker = await git(handles.staging!, [
+    "-c", "user.name=gx-dev", "-c", "user.email=gx-dev@localhost",
+    "commit", "--allow-empty", "--only", "-m", message,
+  ]);
+  assert.equal(marker.code, 0, marker.stderr);
+  const crashedMarker = await git(repo, ["rev-parse", handles.branches.staging]);
+
+  // The retry must recognize the existing marker and fast-forward as-is.
+  const applied = await manager.commitStaged(handles, message, "main");
+  assert.equal(applied.strategy, "fast-forward");
+  assert.equal(applied.commitHash, crashedMarker.stdout.trim(), "no second marker may be created");
+
+  const markers = await git(repo, [
+    "log", "--format=%H", "-F", "--grep", `Run-id: run-commit-ff-retry`, applied.commitHash,
+  ]);
+  assert.equal(markers.stdout.trim().split("\n").filter((s) => s !== "").length, 1, "exactly one marker commit expected");
+  assert.notEqual(applied.commitHash, base);
+
+  await manager.cleanup(handles, { force: true });
+});
+
+test("fast-forward apply refuses a dirty staging worktree", { timeout: 30000 }, async (t) => {
+  const { repo, manager, base, handles } = await prepareAndIntegrate(t, "run-commit-ff-dirty");
+
+  const cfg = await git(repo, ["config", "gx-dev.ffOnly", "true"]);
+  assert.equal(cfg.code, 0, cfg.stderr);
+  writeFileSync(join(handles.staging!, "unintegrated.txt"), "not part of the verified result\n");
+
+  await assert.rejects(
+    () => manager.commitStaged(handles, buildCommitMessage({
+      request: "Should not apply",
+      runId: "run-commit-ff-dirty",
+      artifacts: [],
+      strategy: "fast-forward",
+    }), "main"),
+    /staging worktree has uncommitted changes/,
+  );
+
+  // Nothing was applied: main still sits on the base and no marker exists.
+  const head = await git(repo, ["rev-parse", "HEAD"]);
+  assert.equal(head.stdout.trim(), base);
+  const markers = await git(repo, [
+    "log", "--format=%H", "-F", "--grep", "Run-id: run-commit-ff-dirty", handles.branches.staging,
+  ]);
+  assert.equal(markers.stdout.trim(), "");
 
   await manager.cleanup(handles, { force: true });
 });
@@ -186,6 +282,181 @@ test("commitStaged refuses when the main repo tree is dirty", { timeout: 30000 }
     () => manager.commitStaged(handles, "should not apply", "main"),
     /uncommitted changes/,
   );
+
+  await manager.cleanup(handles, { force: true });
+});
+
+test("commitStaged refuses when HEAD sits on a different branch at the recorded base SHA", { timeout: 30000 }, async (t) => {
+  const { repo, manager, base, handles } = await prepareAndIntegrate(t, "run-switch-1");
+
+  // Same SHA, different branch: a user checkout mid-run must never receive
+  // the result silently (the old guard only compared HEAD SHAs).
+  const checkout = await git(repo, ["checkout", "-b", "other"]);
+  assert.equal(checkout.code, 0, checkout.stderr);
+
+  await assert.rejects(
+    () => manager.commitStaged(handles, "should not apply", "main"),
+    /branch mismatch/,
+  );
+
+  // Nothing was applied: `main` and the tree are untouched.
+  const mainTip = await git(repo, ["rev-parse", "main"]);
+  assert.equal(mainTip.stdout.trim(), base);
+  assert.ok(!existsSync(join(repo, "dev.txt")));
+
+  // Back on the recorded branch the same call succeeds.
+  const back = await git(repo, ["checkout", "main"]);
+  assert.equal(back.code, 0, back.stderr);
+  const applied = await manager.commitStaged(handles, "applies on main", "main");
+  assert.ok(/^[0-9a-f]{40}$/.test(applied.commitHash));
+
+  await manager.cleanup(handles, { force: true });
+});
+
+test("commitStaged refuses a supplied base branch other than the checked-out one", { timeout: 30000 }, async (t) => {
+  const { manager, handles } = await prepareAndIntegrate(t, "run-target-1");
+
+  await assert.rejects(
+    () => manager.commitStaged(handles, "should not apply", "develop"),
+    /different branch/,
+  );
+
+  await manager.cleanup(handles, { force: true });
+});
+
+test("commitStaged tolerates gx-dev internal state but still refuses unrelated dirty files", { timeout: 30000 }, async (t) => {
+  const { repo, manager, handles } = await prepareAndIntegrate(t, "run-internal-apply");
+
+  // gx-dev's own runtime state does not block the final application.
+  mkdirSync(join(repo, ".gx-dev", "runs", "run-internal-apply"), { recursive: true });
+  writeFileSync(join(repo, ".gx-dev", "runs", "run-internal-apply", "state.json"), "{}\n");
+  const applied = await manager.commitStaged(handles, "applies despite internal state", "main");
+  assert.ok(/^[0-9a-f]{40}$/.test(applied.commitHash));
+
+  await manager.cleanup(handles, { force: true });
+
+  // Unrelated uncommitted files still block.
+  const second = await prepareAndIntegrate(t, "run-unrelated-apply");
+  writeFileSync(join(second.repo, "in-progress.txt"), "user work\n");
+  await assert.rejects(
+    () => second.manager.commitStaged(second.handles, "should not apply", "main"),
+    /uncommitted changes/,
+  );
+  await second.manager.cleanup(second.handles, { force: true });
+});
+
+test("commitStaged emits a history-preserving revert as the rollback command", { timeout: 30000 }, async (t) => {
+  const { repo, manager, base, handles } = await prepareAndIntegrate(t, "run-revert-1");
+
+  const applied = await manager.commitStaged(handles, "rollback probe", "main");
+  assert.equal(applied.rollbackCommand, `git revert --no-edit --mainline 1 ${applied.commitHash}`);
+  assert.ok(!applied.rollbackCommand.includes("reset --hard"));
+  assert.ok(!applied.rollbackCommand.includes("branch -f"));
+
+  // The emitted command must actually undo the result without rewriting
+  // history: run it verbatim (single command, no shell needed).
+  const argv = applied.rollbackCommand.split(/\s+/).slice(1); // drop "git"
+  const rollback = await git(repo, argv, { env: GIT_ENV });
+  assert.equal(rollback.code, 0, rollback.stderr);
+
+  // The working tree is back to the base content...
+  assert.ok(!existsSync(join(repo, "dev.txt")));
+  assert.ok(!existsSync(join(repo, "test.txt")));
+  const head = await git(repo, ["rev-parse", "HEAD"]);
+  assert.notEqual(head.stdout.trim(), base);
+  // ...while both the base and the applied merge remain reachable in main's
+  // history, and the reverted tree exactly matches the base tree.
+  const history = await git(repo, ["log", "--format=%H", "main"]);
+  const hashes = history.stdout.split("\n").map((line) => line.trim());
+  assert.ok(hashes.includes(applied.commitHash), "merge commit must remain reachable");
+  assert.ok(hashes.includes(base), "base must remain reachable");
+  const treeDiff = await git(repo, ["diff", "--stat", base, "HEAD"]);
+  assert.equal(treeDiff.stdout.trim(), "", "reverted tree must equal the base tree");
+
+  await manager.cleanup(handles, { force: true });
+});
+
+test("fast-forward integration emits a first-parent revert chain whose execution restores the base tree", { timeout: 60000 }, async (t) => {
+  const { repo, manager, base, handles } = await prepareAndIntegrate(t, "run-revert-ff");
+
+  const cfg = await git(repo, ["config", "gx-dev.ffOnly", "true"]);
+  assert.equal(cfg.code, 0, cfg.stderr);
+  const message = buildCommitMessage({
+    request: "Add the export widget",
+    runId: "run-revert-ff",
+    artifacts: ["dev.txt", "test.txt"],
+    strategy: "fast-forward",
+  });
+  const applied = await manager.commitStaged(handles, message, "main");
+  assert.equal(applied.strategy, "fast-forward");
+
+  assert.ok(applied.rollbackCommand.startsWith("git revert"));
+  assert.ok(!applied.rollbackCommand.includes("reset --hard"));
+  assert.ok(!applied.rollbackCommand.includes("branch -f"));
+
+  // The provenance marker is an empty tree-delta: it must not be reverted
+  // (git revert would refuse and break the chain).
+  assert.ok(
+    !applied.rollbackCommand.includes(applied.commitHash),
+    "the empty provenance marker must be skipped by the rollback",
+  );
+
+  // Only the FIRST-PARENT chain is reverted: side branches merged into
+  // staging are undone by the merge reversion itself (-m 1) — reverting
+  // them individually would double-revert the same diffs.
+  const chain = await git(repo, ["rev-list", "--first-parent", `${base}..${applied.commitHash}`]);
+  const chainShas = chain.stdout.split("\n").map((s) => s.trim()).filter((s) => s !== "");
+  const revertible = chainShas.filter((s) => s !== applied.commitHash);
+  assert.ok(revertible.length >= 2, "the chain must span the merge and its first-parent commits");
+  for (const sha of revertible) {
+    assert.ok(applied.rollbackCommand.includes(sha), `rollback must revert ${sha}`);
+  }
+  const everything = await git(repo, ["rev-list", `${base}..${applied.commitHash}`]);
+  const sideBranch = everything.stdout
+    .split("\n").map((s) => s.trim())
+    .filter((s) => s !== "" && !chainShas.includes(s));
+  assert.ok(sideBranch.length >= 1, "the merged tests branch must be a side branch of the chain");
+  for (const sha of sideBranch) {
+    assert.ok(
+      !applied.rollbackCommand.includes(sha),
+      `side-branch commit ${sha} must not be reverted individually (double revert)`,
+    );
+  }
+  assert.equal(
+    applied.rollbackCommand.split("--mainline 1").length - 1,
+    1,
+    "exactly one merge commit is expected in the fast-forward range",
+  );
+  const newest = revertible[0] ?? "";
+  const oldest = revertible[revertible.length - 1] ?? "";
+  assert.ok(
+    applied.rollbackCommand.indexOf(newest) < applied.rollbackCommand.indexOf(oldest),
+    "reversions must be ordered newest-first",
+  );
+
+  // EXECUTE the emitted rollback verbatim: it must undo the fast-forward.
+  for (const step of applied.rollbackCommand.split(" && ")) {
+    const argv = step.trim().split(/\s+/).slice(1); // drop "git"
+    const rollback = await git(repo, argv, { env: GIT_ENV });
+    assert.equal(rollback.code, 0, `rollback step failed: ${step}\n${rollback.stderr}`);
+  }
+
+  // The original base tree is restored exactly...
+  const treeDiff = await git(repo, ["diff", "--stat", base, "HEAD"]);
+  assert.equal(treeDiff.stdout.trim(), "", "rolled-back tree must equal the base tree");
+  assert.ok(!existsSync(join(repo, "dev.txt")));
+  assert.ok(!existsSync(join(repo, "test.txt")));
+  // ...with zero history loss: the base, every applied commit, and the
+  // provenance marker remain reachable from the branch.
+  const history = await git(repo, ["log", "--format=%H", "main"]);
+  const hashes = history.stdout.split("\n").map((s) => s.trim());
+  assert.ok(hashes.includes(base), "base must remain reachable");
+  for (const sha of chainShas) {
+    assert.ok(hashes.includes(sha), `${sha} must remain reachable`);
+  }
+  for (const sha of sideBranch) {
+    assert.ok(hashes.includes(sha), `side-branch commit ${sha} must remain reachable`);
+  }
 
   await manager.cleanup(handles, { force: true });
 });

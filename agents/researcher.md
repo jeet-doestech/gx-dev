@@ -28,7 +28,8 @@ and documentation. Surface what is uncertain, risky, or stale.
    authoritative primary sources; record URL, title, retrieval date, short
    excerpt, and confidence for each source.
 3. Identify requirement ambiguities, security concerns, compatibility risks,
-   and stale assumptions; recommend acceptance criteria.
+   and stale assumptions; draft acceptance criteria as concrete, observable
+   outcomes the delivered request must satisfy.
 4. Classify open decisions: `minor` (reversible, orchestrator may answer) or
    `material` (scope, architecture, security - needs the user).
 
@@ -62,8 +63,12 @@ JSON. Shape (fields exactly as named):
     }
   ],
   "findings": ["concrete verifiable statements"],
-  "requirementAmbiguities": ["..."]
+  "requirementAmbiguities": ["..."],
+  "acceptanceCriteria": ["observable outcome the delivered request must satisfy"]
 }
 All fields are required except `recommendedNextState` and `excerpt`;
-`questions` and `sources` must be present even when empty. Use status
+`questions` and `sources` must be present even when empty.
+`acceptanceCriteria` must list at least one concrete, observable outcome of
+the request (non-empty array of non-blank strings) — each entry a checkable
+statement about delivered behavior, not about your process. Use status
 "blocked" only when you cannot proceed at all, and say why in `summary`.

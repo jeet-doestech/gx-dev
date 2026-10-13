@@ -18,17 +18,28 @@
  * Exit codes: 0 ok · 1 usage error / unknown role / environment failure ·
  * 2 invalid model spec.
  *
+ * Trust guard (mirror of the extension's ctx.isProjectTrusted() policy):
+ * scripts run outside pi's project-trust model, so a repository-configured
+ * executable (agents.piBinary) is NEVER executed here — model-availability
+ * probes always use the ambient `pi` on PATH, never the repo's configured
+ * binary. Mutating commands (set/unset) refuse to touch a repo config that
+ * fails strict validation: the merge helpers tolerate unreadable configs and
+ * would silently replace the whole file with just the new selection, so an
+ * invalid file is a hard stop (fix or remove it first) instead of a wipe.
+ *
  * Frozen sibling contracts used (extensions/gx-dev, loaded dynamically as in
  * doctor.mjs because this is a .mjs script):
  *   config.ts            MODEL_ROLE_KEYS, INHERIT_MODEL, GLM_53_FLASH_MAX,
  *                        loadConfigWithSources, mergeModelSelection,
- *                        unsetModelSelection, isValidModelSelection
+ *                        unsetModelSelection, isValidModelSelection,
+ *                        validateConfig
  *   agents/discovery.ts  loadRolePrompt (frontmatter `model:` pins)
  *   agents/models.ts     parseListModelOutput, listModelsViaCli,
  *                        listModelsViaRegistry, splitSpec, resolveModelSpec,
  *                        matchModel, qualifySpec, THINKING_LEVELS, PiModelInfo
  */
 
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -88,6 +99,29 @@ function parseArgv(argv) {
 function normalizeRole(raw, configMod) {
   const camel = raw.replace(/-+([a-z0-9])/g, (_, c) => c.toUpperCase());
   return configMod.MODEL_ROLE_KEYS.find((r) => r === camel) ?? null;
+}
+
+/**
+ * Fails closed before any mutation: a repo config that exists but is invalid
+ * (unparseable JSON or strict-validation errors) blocks set/unset. Without
+ * this guard the merge helpers' tolerant read would treat the broken file as
+ * empty and overwrite it, silently destroying the rest of the user's config.
+ */
+function assertRepoConfigMutable(repoPath, configMod) {
+  const file = join(repoPath, ".gx-dev", "config.json");
+  if (!existsSync(file)) return;
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(file, "utf8"));
+  } catch (e) {
+    console.error(`refusing to write ${file}: invalid JSON (${errorMessage(e)}) — fix or remove the file first`);
+    process.exit(1);
+  }
+  const result = configMod.validateConfig(raw);
+  if (!result.ok) {
+    console.error(`refusing to write ${file}: invalid config (${result.errors.join("; ")}) — fix the file first`);
+    process.exit(1);
+  }
 }
 
 function roleOrExit(raw, configMod) {
@@ -278,6 +312,7 @@ async function cmdSet(args, repoPath, configMod, discoveryMod, modelsMod) {
     );
     process.exit(2);
   }
+  assertRepoConfigMutable(repoPath, configMod);
   if (spec !== configMod.INHERIT_MODEL) {
     await warnIfUnavailable(spec, configMod, modelsMod);
   }
@@ -297,6 +332,7 @@ async function cmdUnset(args, repoPath, configMod, discoveryMod, modelsMod) {
     process.exit(1);
   }
   const role = roleOrExit(roleRaw, configMod);
+  assertRepoConfigMutable(repoPath, configMod);
   try {
     await configMod.unsetModelSelection(repoPath, role);
   } catch (e) {

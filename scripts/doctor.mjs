@@ -4,15 +4,22 @@
  *
  *   node scripts/doctor.mjs
  *
- * Checks: node >= 22, git available, pi available (warn only — required for
+ * Checks: node >= 24, git available, pi available (warn only — required for
  * --live runs), the seven role prompt files under agents/, that
- * defaultConfig() passes validateConfig(), and (MODEL section, warn-only)
- * that every role's effective model selection resolves and — when not
- * "inherit" — matches a model pi actually offers. Exit code is non-zero on
- * any FAIL; model availability warnings never fail the check.
+ * defaultConfig() passes validateConfig(), the target repo's
+ * .gx-dev/config.json when present (strict validation — runs fail closed on
+ * an invalid config), and (MODEL section, warn-only) that every role's
+ * effective model selection resolves and — when not "inherit" — matches a
+ * model pi actually offers. Exit code is non-zero on any FAIL; model
+ * availability warnings never fail the check.
+ *
+ * Trust guard (mirror of the extension's ctx.isProjectTrusted() policy):
+ * scripts run outside pi's project-trust model, so a repository-configured
+ * executable (agents.piBinary) is REPORTED here but NEVER executed — every
+ * probe in this script targets the ambient `pi` and `git` on PATH only.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -48,10 +55,10 @@ function fail(msg) {
 
 function checkNodeVersion() {
   const major = Number(process.versions.node.split(".")[0]);
-  if (Number.isFinite(major) && major >= 22) {
-    pass(`node >= 22 (v${process.versions.node})`);
+  if (Number.isFinite(major) && major >= 24) {
+    pass(`node >= 24 (v${process.versions.node})`);
   } else {
-    fail(`node >= 22 required, found v${process.versions.node}`);
+    fail(`node >= 24 required, found v${process.versions.node}`);
   }
 }
 
@@ -82,6 +89,55 @@ function checkAgentPrompts() {
     pass(`agents dir has all ${ROLE_FILES.length} role prompts (${agentsDir})`);
   } else {
     fail(`agents dir missing ${missing.length} role prompt(s): ${missing.join(", ")}`);
+  }
+}
+
+/** --repo <path> | --repo=<path>, default cwd (shared by all repo checks). */
+function repoFlagPath() {
+  let repoPath = process.cwd();
+  const argv = process.argv.slice(2);
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--repo") {
+      repoPath = resolve(String(argv[i + 1] ?? process.cwd()));
+      break;
+    }
+    if (typeof arg === "string" && arg.startsWith("--repo=")) {
+      repoPath = resolve(arg.slice("--repo=".length));
+      break;
+    }
+  }
+  return repoPath;
+}
+
+/**
+ * Repo config guard: when the target repo carries a .gx-dev/config.json it
+ * is validated strictly (gx-dev runs fail closed on invalid config, so
+ * doctor must surface the same problem). The configured agents.piBinary is
+ * displayed for awareness but deliberately not executed — scripts run
+ * outside pi's project-trust model, so no repository-configured executable
+ * is ever spawned here.
+ */
+async function checkRepoConfig() {
+  const repoPath = repoFlagPath();
+  const file = join(repoPath, ".gx-dev", "config.json");
+  if (!existsSync(file)) {
+    pass(`no repo .gx-dev/config.json (${repoPath}) — defaults apply`);
+    return;
+  }
+  try {
+    const configUrl = pathToFileURL(join(repoRoot, "extensions", "gx-dev", "config.ts")).href;
+    const { validateConfig } = await import(configUrl);
+    const raw = JSON.parse(readFileSync(file, "utf8"));
+    const result = validateConfig(raw);
+    if (!result.ok) {
+      fail(`repo .gx-dev/config.json invalid (runs fail closed): ${result.errors.join("; ")}`);
+      return;
+    }
+    pass(
+      `repo .gx-dev/config.json valid (agents.piBinary "${result.config.agents.piBinary}" reported only — never executed by doctor)`);
+  } catch (e) {
+    fail(`repo .gx-dev/config.json unreadable: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -118,20 +174,7 @@ async function checkModels() {
     const { loadRolePrompt } = await import(discoveryUrl);
     const modelsMod = await import(modelsUrl);
 
-    // --repo <path> | --repo=<path>, default cwd (same flag as models.mjs).
-    let repoPath = process.cwd();
-    const argv = process.argv.slice(2);
-    for (let i = 0; i < argv.length; i++) {
-      const arg = argv[i];
-      if (arg === "--repo") {
-        repoPath = resolve(String(argv[i + 1] ?? process.cwd()));
-        break;
-      }
-      if (typeof arg === "string" && arg.startsWith("--repo=")) {
-        repoPath = resolve(arg.slice("--repo=".length));
-        break;
-      }
-    }
+    const repoPath = repoFlagPath();
 
     const loaded = await loadConfigWithSources(repoPath);
     console.log(`\nmodel selection (repo: ${repoPath}):`);
@@ -192,6 +235,7 @@ await checkBinary("git", ["--version"], { required: true });
 await checkBinary("pi", ["--version"], { required: false });
 checkAgentPrompts();
 await checkConfig();
+await checkRepoConfig();
 await checkModels();
 
 console.log(failed ? "\ndoctor: FAIL" : "\ndoctor: OK (warnings do not fail the check)");

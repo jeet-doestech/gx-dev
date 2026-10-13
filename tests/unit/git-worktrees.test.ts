@@ -8,6 +8,8 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  realpathSync,
+  symlinkSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -78,7 +80,7 @@ test("inspectRepository reports a clean repo", { timeout: 30000 }, async (t) => 
   assert.equal(inspect.commit, base);
   assert.equal(inspect.dirty, false);
   assert.deepEqual(inspect.dirtyFiles, []);
-  assert.ok(inspect.existingWorktrees.includes(repo));
+  assert.ok(inspect.existingWorktrees.map((path) => realpathSync(path)).includes(realpathSync(repo)));
 });
 
 test("inspectRepository reports dirty state with file list", { timeout: 30000 }, async (t) => {
@@ -141,9 +143,37 @@ test("prepareWorktrees creates three worktrees and branches at the base commit",
 
   const inspect = await inspectRepository(repo);
   for (const wt of [handles.developer, handles.tests, handles.staging]) {
-    assert.ok(wt && inspect.existingWorktrees.includes(wt));
+    assert.ok(wt && inspect.existingWorktrees.map((path) => realpathSync(path)).includes(realpathSync(wt)));
   }
 
+  await manager.cleanup(handles);
+});
+
+test("worktree inspection and recovery accept symlinked repository paths", { timeout: 30000 }, async (t) => {
+  const { parent, repo } = makeSandbox(t);
+  await initRepo(repo, { "README.md": "# symlink regression\n" });
+  // Model macOS's /var -> /private/var alias explicitly on every CI platform.
+  const alias = join(parent, "alias");
+  symlinkSync(parent, alias, process.platform === "win32" ? "junction" : "dir");
+  const aliasedRepo = join(alias, "repo");
+  assert.notEqual(aliasedRepo, realpathSync(aliasedRepo));
+
+  const manager = new GitWorktreeManager();
+  await manager.recordBase(aliasedRepo);
+  const handles = await manager.prepareWorktrees(aliasedRepo, "run-symlink-path");
+  const inspect = await inspectRepository(aliasedRepo);
+  const listed = inspect.existingWorktrees.map((path) => realpathSync(path));
+  assert.equal(inspect.isRepo, true);
+  assert.equal(inspect.dirty, false);
+  assert.ok(listed.includes(realpathSync(aliasedRepo)));
+  for (const worktree of [handles.developer, handles.tests, handles.staging]) {
+    assert.ok(worktree && listed.includes(realpathSync(worktree)));
+  }
+
+  const reopened = await new GitWorktreeManager().prepareWorktrees(aliasedRepo, handles.runId);
+  for (const role of ["developer", "tests", "staging"] as const) {
+    assert.equal(realpathSync(reopened[role]!), realpathSync(handles[role]!));
+  }
   await manager.cleanup(handles);
 });
 
@@ -156,6 +186,196 @@ test("prepareWorktrees refuses a dirty tree (refuse-to-overwrite rule)", { timeo
   await assert.rejects(
     () => manager.prepareWorktrees(repo, "run-dirty-1"),
     /uncommitted changes/,
+  );
+});
+
+test("prepareWorktrees ignores gx-dev internal .gx-dev state but never unrelated dirty files", { timeout: 30000 }, async (t) => {
+  const { repo } = makeSandbox(t);
+  await initRepo(repo, { "README.md": "# test\n" });
+
+  const manager = new GitWorktreeManager();
+  // gx-dev's own runtime state (run records, memory) must not block prepare.
+  mkdirSync(join(repo, ".gx-dev", "runs", "boot"), { recursive: true });
+  writeFileSync(join(repo, ".gx-dev", "runs", "boot", "state.json"), "{}\n");
+  mkdirSync(join(repo, ".gx-dev", "memory"), { recursive: true });
+  writeFileSync(join(repo, ".gx-dev", "memory", "INDEX.md"), "# memory\n");
+  const handles = await manager.prepareWorktrees(repo, "run-internal-state");
+  await manager.cleanup(handles);
+
+  // Any unrelated file still blocks, even next to internal state.
+  writeFileSync(join(repo, "user-notes.txt"), "unrelated work\n");
+  const manager2 = new GitWorktreeManager();
+  await assert.rejects(
+    () => manager2.prepareWorktrees(repo, "run-internal-state-2"),
+    /uncommitted changes/,
+  );
+  const inspect = await inspectRepository(repo);
+  assert.ok(inspect.dirtyFiles.includes("user-notes.txt"));
+});
+
+test("prepareWorktrees preserves the base recorded by recordBase and refuses a moved base", { timeout: 30000 }, async (t) => {
+  const { repo } = makeSandbox(t);
+  const base = await initRepo(repo, { "README.md": "# test\n" });
+
+  const manager = new GitWorktreeManager();
+  await manager.recordBase(repo);
+
+  // The branch moves after intake: preparation must keep the approved
+  // anchor and refuse, never silently re-anchor to the new tip.
+  await commitFile(repo, "later.txt", "moved on\n", "later commit");
+  await assert.rejects(
+    () => manager.prepareWorktrees(repo, "run-anchor-1"),
+    /recordBase/,
+  );
+
+  // Back on the recorded base, the run branches from it — not from a tip.
+  const reset = await git(repo, ["reset", "--hard", base]);
+  assert.equal(reset.code, 0, reset.stderr);
+  const handles = await manager.prepareWorktrees(repo, "run-anchor-1");
+  for (const role of ["developer", "tests", "staging"] as const) {
+    const tip = await git(repo, ["rev-parse", handles.branches[role]]);
+    assert.equal(tip.stdout.trim(), base, `${role} must sit on the recorded base`);
+  }
+  await manager.cleanup(handles);
+});
+
+test("prepareWorktrees reopens an existing run's worktrees after a restart", { timeout: 30000 }, async (t) => {
+  const { repo } = makeSandbox(t);
+  const base = await initRepo(repo, { "README.md": "# test\n" });
+
+  const first = new GitWorktreeManager();
+  const original = await first.prepareWorktrees(repo, "run-reopen-1");
+  assert.ok(original.developer);
+  assert.ok(original.tests);
+  assert.ok(original.staging);
+
+  // A crashed run leaves real progress in the developer worktree.
+  writeFileSync(join(original.developer, "dev.txt"), "developer output\n");
+  const add = await git(original.developer, ["add", "-A"]);
+  assert.equal(add.code, 0, add.stderr);
+  const commit = await git(original.developer, ["commit", "-m", "wip"], { env: GIT_ENV });
+  assert.equal(commit.code, 0, commit.stderr);
+  const devTip = await git(repo, ["rev-parse", original.branches.developer]);
+
+  // A brand-new manager (restart) reopens the same run without records.
+  const second = new GitWorktreeManager();
+  const reopened = await second.prepareWorktrees(repo, "run-reopen-1");
+  assert.equal(reopened.developer, original.developer);
+  assert.equal(reopened.tests, original.tests);
+  assert.equal(reopened.staging, original.staging);
+  assert.deepEqual(reopened.branches, original.branches);
+
+  const tipAfter = await git(repo, ["rev-parse", reopened.branches.developer]);
+  assert.equal(tipAfter.stdout.trim(), devTip.stdout.trim(), "reopen must not reset in-run progress");
+
+  // The recovered base (merge-base of the run's branches) still anchors the
+  // final application on the untouched user branch.
+  const result = await second.integrate(reopened);
+  assert.equal(result.success, true, `integrate failed: ${JSON.stringify(result.conflictedFiles)}`);
+  const applied = await second.commitStaged(reopened, "reopened run", "main");
+  assert.notEqual(applied.commitHash, base);
+  const head = await git(repo, ["rev-parse", "HEAD"]);
+  assert.equal(head.stdout.trim(), applied.commitHash);
+
+  await second.cleanup(reopened, { force: true });
+});
+
+test("prepareWorktrees recovers a partially created run from its surviving branch", { timeout: 30000 }, async (t) => {
+  const { repo } = makeSandbox(t);
+  const base = await initRepo(repo, { "README.md": "# test\n" });
+
+  const first = new GitWorktreeManager();
+  const original = await first.prepareWorktrees(repo, "run-partial-1");
+  assert.ok(original.developer);
+  assert.ok(original.tests);
+  assert.ok(original.staging);
+
+  // Simulate a crash right after only the developer worktree was created.
+  for (const wt of [original.tests, original.staging]) {
+    const rm = await git(repo, ["worktree", "remove", wt as string]);
+    assert.equal(rm.code, 0, rm.stderr);
+  }
+  for (const branch of [original.branches.tests, original.branches.staging]) {
+    const del = await git(repo, ["branch", "-D", branch]);
+    assert.equal(del.code, 0, del.stderr);
+  }
+
+  const second = new GitWorktreeManager();
+  const reopened = await second.prepareWorktrees(repo, "run-partial-1");
+  for (const wt of [reopened.developer, reopened.tests, reopened.staging]) {
+    assert.ok(wt !== null && existsSync(wt), "all three worktrees must exist after recovery");
+  }
+  for (const role of ["developer", "tests", "staging"] as const) {
+    const tip = await git(repo, ["rev-parse", reopened.branches[role]]);
+    assert.equal(tip.stdout.trim(), base);
+  }
+  await second.cleanup(reopened);
+});
+
+test("prepareWorktrees refuses to reuse a run branch that no longer descends from the base", { timeout: 30000 }, async (t) => {
+  const { repo } = makeSandbox(t);
+  await initRepo(repo, { "README.md": "# test\n" });
+
+  const first = new GitWorktreeManager();
+  const original = await first.prepareWorktrees(repo, "run-diverge-1");
+
+  // Move the staging branch to an unrelated root commit.
+  const tree = await git(repo, ["commit-tree", "HEAD^{tree}", "-m", "stray root"], { env: GIT_ENV });
+  assert.equal(tree.code, 0, tree.stderr);
+  const move = await git(repo, ["update-ref", `refs/heads/${original.branches.staging}`, tree.stdout.trim()]);
+  assert.equal(move.code, 0, move.stderr);
+
+  const second = new GitWorktreeManager();
+  await assert.rejects(
+    () => second.prepareWorktrees(repo, "run-diverge-1"),
+    /does not descend/,
+  );
+
+  await first.cleanup(original, { force: true });
+});
+
+test("prepareWorktrees refuses when a run branch is checked out in an unexpected worktree", { timeout: 30000 }, async (t) => {
+  const { repo, parent } = makeSandbox(t);
+  await initRepo(repo, { "README.md": "# test\n" });
+
+  const first = new GitWorktreeManager();
+  const original = await first.prepareWorktrees(repo, "run-elsewhere-1");
+  assert.ok(original.staging);
+
+  // Detach the staging branch into a foreign worktree path.
+  const remove = await git(repo, ["worktree", "remove", original.staging]);
+  assert.equal(remove.code, 0, remove.stderr);
+  const foreign = join(parent, "foreign-staging");
+  const add = await git(repo, ["worktree", "add", foreign, original.branches.staging]);
+  assert.equal(add.code, 0, add.stderr);
+
+  const second = new GitWorktreeManager();
+  await assert.rejects(
+    () => second.prepareWorktrees(repo, "run-elsewhere-1"),
+    /checked out at/,
+  );
+
+  const rmForeign = await git(repo, ["worktree", "remove", "--force", foreign]);
+  assert.equal(rmForeign.code, 0, rmForeign.stderr);
+  await first.cleanup(original, { force: true });
+});
+
+test("prepareWorktrees accepts an explicit base commit and anchors new branches to it", { timeout: 30000 }, async (t) => {
+  const { repo } = makeSandbox(t);
+  const base = await initRepo(repo, { "README.md": "# test\n" });
+  await commitFile(repo, "later.txt", "later\n", "later commit");
+
+  const manager = new GitWorktreeManager();
+  const handles = await manager.prepareWorktrees(repo, "run-explicit-base", base);
+  for (const role of ["developer", "tests", "staging"] as const) {
+    const tip = await git(repo, ["rev-parse", handles.branches[role]]);
+    assert.equal(tip.stdout.trim(), base, `${role} must anchor to the explicit base`);
+  }
+  await manager.cleanup(handles);
+
+  await assert.rejects(
+    () => manager.prepareWorktrees(repo, "run-explicit-missing", "0123456789abcdef0123456789abcdef01234567"),
+    /does not resolve/,
   );
 });
 

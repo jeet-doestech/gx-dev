@@ -151,3 +151,108 @@ describe("wire usage + servedModel", () => {
     assert.equal(r.finalText, "OK");
   });
 });
+
+describe("usage aggregation across turns (REVIEW: retain whole-run usage, not the latest message)", () => {
+  it("sums usage across multiple completed assistant messages", () => {
+    const acc = new StreamAccumulator();
+    acc.feed(
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "turn one" }], usage: { input: 100, output: 50 } },
+      }),
+    );
+    acc.feed(
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "turn two" }], usage: { input: 200, output: 30 } },
+      }),
+    );
+    const r = acc.result();
+    assert.deepEqual(r.usage, { inputTokens: 300, outputTokens: 80 });
+    assert.equal(r.finalText, "turn one\nturn two");
+  });
+
+  it("counts an in-flight message once: message_update usage is cumulative per message", () => {
+    const acc = new StreamAccumulator();
+    acc.feed(JSON.stringify({ type: "message_update", usage: { input: 10, output: 2 } }));
+    acc.feed(JSON.stringify({ type: "message_update", usage: { input: 25, output: 9 } }));
+    // message_end without usage falls back to the last cumulative update.
+    acc.feed(
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "done" }] },
+      }),
+    );
+    assert.deepEqual(acc.result().usage, { inputTokens: 25, outputTokens: 9 });
+  });
+
+  it("aggregates multi-turn runs where each turn streams its own cumulative usage", () => {
+    const acc = new StreamAccumulator();
+    // Turn 1: streaming updates then a final authoritative end.
+    acc.feed(JSON.stringify({ type: "message_update", usage: { input: 60, output: 10 } }));
+    acc.feed(JSON.stringify({ type: "message_update", usage: { input: 100, output: 50 } }));
+    acc.feed(
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "a" }], usage: { input: 100, output: 55 } },
+      }),
+    );
+    acc.feed(JSON.stringify({ type: "tool_execution_end", toolCallId: "t", toolName: "bash", result: "", isError: false }));
+    // Turn 2: fresh message; the message_end value is authoritative.
+    acc.feed(JSON.stringify({ type: "message_update", usage: { input: 40, output: 10 } }));
+    acc.feed(
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "b" }], usage: { input: 40, output: 15 } },
+      }),
+    );
+    assert.deepEqual(acc.result().usage, { inputTokens: 140, outputTokens: 70 });
+  });
+
+  it("does not double-count when message_end repeats the in-flight update usage", () => {
+    const acc = new StreamAccumulator();
+    acc.feed(JSON.stringify({ type: "message_update", usage: { input: 42, output: 17 } }));
+    acc.feed(
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "x" }], usage: { input: 42, output: 17 } },
+      }),
+    );
+    assert.deepEqual(acc.result().usage, { inputTokens: 42, outputTokens: 17 });
+  });
+
+  it("ignores usage on non-assistant message_end events", () => {
+    const acc = new StreamAccumulator();
+    acc.feed(
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "user", content: [{ type: "text", text: "task" }], usage: { input: 999, output: 999 } },
+      }),
+    );
+    assert.equal(acc.result().usage, null);
+  });
+
+  it("still reports the in-flight message usage when the stream is truncated (killed child)", () => {
+    const acc = new StreamAccumulator();
+    acc.feed(
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "one" }], usage: { input: 10, output: 5 } },
+      }),
+    );
+    acc.feed(JSON.stringify({ type: "message_update", usage: { input: 7, output: 3 } }));
+    // No message_end for the second message — truncated tail.
+    assert.deepEqual(acc.result().usage, { inputTokens: 17, outputTokens: 8 });
+  });
+
+  it("reports null usage when no usage was ever observed", () => {
+    const acc = new StreamAccumulator();
+    acc.feed(
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "no usage here" }] },
+      }),
+    );
+    assert.equal(acc.result().usage, null);
+  });
+});

@@ -29,6 +29,7 @@ const researcherCompletion = {
   ],
   findings: ["vitest configured"],
   requirementAmbiguities: ["wording of AC2"],
+  acceptanceCriteria: ["vitest run exits 0 on the current suite"],
 };
 
 describe("validateOrFeedback", () => {
@@ -43,6 +44,7 @@ describe("validateOrFeedback", () => {
     assert.equal(c.sources.length, 1);
     assert.equal(c.sources[0]?.confidence, "high");
     assert.equal(c.requirementAmbiguities[0], "wording of AC2");
+    assert.equal(c.acceptanceCriteria[0], "vitest run exits 0 on the current suite");
   });
 
   it("accepts a bare JSON object without a fence", () => {
@@ -72,6 +74,44 @@ describe("validateOrFeedback", () => {
     assert.match(r.feedback ?? "", /Required base fields/);
   });
 
+  it("requires non-empty researcher acceptanceCriteria describing observable outcomes", () => {
+    const missing = validateOrFeedback(
+      "researcher",
+      fenced({ ...researcherCompletion, acceptanceCriteria: undefined }),
+    );
+    assert.equal(missing.ok, false);
+    assert.ok(missing.errors.some((e) => e.includes("acceptanceCriteria")));
+
+    const empty = validateOrFeedback(
+      "researcher",
+      fenced({ ...researcherCompletion, acceptanceCriteria: [] }),
+    );
+    assert.equal(empty.ok, false);
+    assert.ok(empty.errors.some((e) => e.includes("acceptanceCriteria")));
+
+    const blank = validateOrFeedback(
+      "researcher",
+      fenced({ ...researcherCompletion, acceptanceCriteria: ["   "] }),
+    );
+    assert.equal(blank.ok, false);
+    assert.ok(blank.errors.some((e) => e.includes("acceptanceCriteria")));
+
+    const good = validateOrFeedback(
+      "researcher",
+      fenced({
+        ...researcherCompletion,
+        acceptanceCriteria: ["vitest run exits 0 on the current suite"],
+      }),
+    );
+    assert.equal(good.ok, true);
+    assert.ok(good.completion);
+    if (good.completion && "acceptanceCriteria" in good.completion) {
+      assert.deepEqual(good.completion.acceptanceCriteria, [
+        "vitest run exits 0 on the current suite",
+      ]);
+    }
+  });
+
   it("requires a non-empty planner rollbackPlan", () => {
     const base = {
       status: "complete",
@@ -89,6 +129,37 @@ describe("validateOrFeedback", () => {
     assert.ok(bad.errors.some((e) => e.includes("rollbackPlan")));
 
     const good = validateOrFeedback("planner", fenced({ ...base, rollbackPlan: "git revert <sha>" }));
+    assert.equal(good.ok, true);
+    assert.ok(good.completion);
+  });
+
+  it("requires a non-empty planner verificationContract (earlier than the gate's empty-contract failure)", () => {
+    const base = {
+      status: "complete",
+      summary: "plan",
+      artifacts: [],
+      questions: [],
+      assumptions: [],
+      risks: [],
+      tasks: [{ id: "T1", assignee: "developer", title: "Do it", files: ["a.ts"], dependsOn: [] }],
+      rollbackPlan: "git revert <sha>",
+    };
+    const missing = validateOrFeedback(
+      "planner",
+      fenced({ ...base, verificationContract: undefined }),
+    );
+    assert.equal(missing.ok, false);
+    assert.ok(missing.errors.some((e) => e.includes("verificationContract")));
+
+    const empty = validateOrFeedback("planner", fenced({ ...base, verificationContract: [] }));
+    assert.equal(empty.ok, false);
+    assert.ok(empty.errors.some((e) => e.includes("verificationContract")));
+
+    const blank = validateOrFeedback("planner", fenced({ ...base, verificationContract: ["  "] }));
+    assert.equal(blank.ok, false);
+    assert.ok(blank.errors.some((e) => e.includes("verificationContract")));
+
+    const good = validateOrFeedback("planner", fenced({ ...base, verificationContract: ["npm test"] }));
     assert.equal(good.ok, true);
     assert.ok(good.completion);
   });
