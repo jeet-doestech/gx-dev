@@ -8,6 +8,8 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  realpathSync,
+  symlinkSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -78,7 +80,7 @@ test("inspectRepository reports a clean repo", { timeout: 30000 }, async (t) => 
   assert.equal(inspect.commit, base);
   assert.equal(inspect.dirty, false);
   assert.deepEqual(inspect.dirtyFiles, []);
-  assert.ok(inspect.existingWorktrees.includes(repo));
+  assert.ok(inspect.existingWorktrees.map((path) => realpathSync(path)).includes(realpathSync(repo)));
 });
 
 test("inspectRepository reports dirty state with file list", { timeout: 30000 }, async (t) => {
@@ -141,9 +143,37 @@ test("prepareWorktrees creates three worktrees and branches at the base commit",
 
   const inspect = await inspectRepository(repo);
   for (const wt of [handles.developer, handles.tests, handles.staging]) {
-    assert.ok(wt && inspect.existingWorktrees.includes(wt));
+    assert.ok(wt && inspect.existingWorktrees.map((path) => realpathSync(path)).includes(realpathSync(wt)));
   }
 
+  await manager.cleanup(handles);
+});
+
+test("worktree inspection and recovery accept symlinked repository paths", { timeout: 30000 }, async (t) => {
+  const { parent, repo } = makeSandbox(t);
+  await initRepo(repo, { "README.md": "# symlink regression\n" });
+  // Model macOS's /var -> /private/var alias explicitly on every CI platform.
+  const alias = join(parent, "alias");
+  symlinkSync(parent, alias, process.platform === "win32" ? "junction" : "dir");
+  const aliasedRepo = join(alias, "repo");
+  assert.notEqual(aliasedRepo, realpathSync(aliasedRepo));
+
+  const manager = new GitWorktreeManager();
+  await manager.recordBase(aliasedRepo);
+  const handles = await manager.prepareWorktrees(aliasedRepo, "run-symlink-path");
+  const inspect = await inspectRepository(aliasedRepo);
+  const listed = inspect.existingWorktrees.map((path) => realpathSync(path));
+  assert.equal(inspect.isRepo, true);
+  assert.equal(inspect.dirty, false);
+  assert.ok(listed.includes(realpathSync(aliasedRepo)));
+  for (const worktree of [handles.developer, handles.tests, handles.staging]) {
+    assert.ok(worktree && listed.includes(realpathSync(worktree)));
+  }
+
+  const reopened = await new GitWorktreeManager().prepareWorktrees(aliasedRepo, handles.runId);
+  for (const role of ["developer", "tests", "staging"] as const) {
+    assert.equal(realpathSync(reopened[role]!), realpathSync(handles[role]!));
+  }
   await manager.cleanup(handles);
 });
 
